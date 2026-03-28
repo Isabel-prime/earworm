@@ -357,7 +357,8 @@
       overflow: hidden;
       height: 3px;
       margin-top: 12px;
-      display: none;
+      /* FIX: always present in the layout — no display:none — so surrounding
+         elements never shift when playback starts or a new song is picked. */
     }
 
     /* ── Scrollbar ── */
@@ -498,7 +499,7 @@
       </div>
     </div>
 
-    <!-- Progress bar -->
+    <!-- Progress bar — always in the layout, never hidden -->
     <div id="progress-wrap"><div class="progress-bar" id="progress-bar"></div></div>
 
     <div class="divider mt16"></div>
@@ -543,22 +544,22 @@ const SCOPES = [
 // ═══════════════════════════════════════════════════════
 //  STATE
 // ═══════════════════════════════════════════════════════
-let accessToken   = null;
-let clientId      = null;
-let userProfile   = null;
-let playlist      = [];
-let currentTrack  = null;
-let clipStartMs   = 0;
-let selectedSec   = 10;
-let scoreCorrect  = 0;
-let scoreTotal    = 0;
-let playTimer     = null;
-let revealed      = false;
-let scored        = false;
+let accessToken    = null;
+let clientId       = null;
+let userProfile    = null;
+let playlist       = [];
+let currentTrack   = null;
+let clipStartMs    = 0;
+let selectedSec    = 10;
+let scoreCorrect   = 0;
+let scoreTotal     = 0;
+let playTimer      = null;
+let revealed       = false;
+let scored         = false;
 let clipGeneration = 0;
-let sdkPlayer     = null;
-let sdkDeviceId   = null;
-let sdkReady      = false;
+let sdkPlayer      = null;
+let sdkDeviceId    = null;
+let sdkReady       = false;
 
 // ═══════════════════════════════════════════════════════
 //  PKCE HELPERS
@@ -569,8 +570,8 @@ function base64url(buffer) {
 }
 
 async function generatePKCE() {
-  const verifier = base64url(crypto.getRandomValues(new Uint8Array(32)));
-  const digest   = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier));
+  const verifier  = base64url(crypto.getRandomValues(new Uint8Array(32)));
+  const digest    = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier));
   const challenge = base64url(digest);
   return { verifier, challenge };
 }
@@ -617,7 +618,7 @@ async function handleCallback(code) {
 
   setStatus('Authenticating with Spotify…');
   const res = await fetch('https://accounts.spotify.com/api/token', {
-    method: 'POST',
+    method:  'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({
       grant_type:    'authorization_code',
@@ -861,7 +862,13 @@ function pickNextSong() {
   document.getElementById('guess-input').value         = '';
   document.getElementById('result-banner').className   = 'result-banner mt12';
   document.getElementById('result-banner').textContent = '';
-  document.getElementById('progress-wrap').style.display = 'none';
+
+  // FIX: reset bar to full with no animation so it's ready for the next
+  // clip without hiding it (which would cause surrounding elements to shift).
+  const bar = document.getElementById('progress-bar');
+  bar.style.transition = 'none';
+  bar.style.width      = '100%';
+
   clearTimeout(playTimer);
 }
 
@@ -885,27 +892,25 @@ async function playClip() {
   clipGeneration++;
   const thisGen = clipGeneration;
 
-  const wrap = document.getElementById('progress-wrap');
-  const bar  = document.getElementById('progress-bar');
+  const bar = document.getElementById('progress-bar');
 
-  wrap.style.display = 'none';
+  // FIX: snap bar to full immediately on button press (no transition) so the
+  // user sees a filled bar right away, before the ~1 s buffer drain wait.
+  bar.style.transition = 'none';
+  bar.style.width      = '100%';
+
   setStatus('Starting playback…');
 
   const clipSec       = selectedSec;
   const targetTrackId = currentTrack.id;
   const targetStart   = clipStartMs;
 
-  // The Spotify Web Playback SDK drives audio through the Web Audio API
-  // internally — it does not create an HTMLMediaElement, so there is no
-  // <audio> element in the DOM to listen to. player_state_changed fires
-  // when the SDK transitions its state machine to "playing", which happens
-  // when it begins filling its audio buffer, roughly SDK_BUFFER_MS before
-  // the first sample actually reaches the speakers.
-  // We therefore wait for the SDK's reported position to advance by
-  // SDK_BUFFER_MS beyond where it was when player_state_changed fired.
-  // Because position advances at 1 ms per 1 ms of wall clock, this creates
-  // an approximately SDK_BUFFER_MS delay — matching the buffer drain time —
-  // so the bar and timer start at the moment audio becomes audible.
+  // The Spotify Web Playback SDK drives audio through the Web Audio API —
+  // it does not create an HTMLMediaElement. player_state_changed fires when
+  // the SDK begins filling its audio buffer, which is SDK_BUFFER_MS before
+  // the first sample reaches the speakers. We wait for position to advance
+  // by SDK_BUFFER_MS after the event fires so the animation starts at the
+  // exact moment audio becomes audible.
   const SDK_BUFFER_MS = 1000;
 
   let confirmed = false;
@@ -921,11 +926,8 @@ async function playClip() {
     resolveStart();
   };
 
-  // ── Layer 1: native <audio> 'playing' event (passive bonus) ───────────
-  // Kept in case a future SDK version exposes an HTMLMediaElement.
-  // Fires at the exact moment audio reaches the output device, which is
-  // more precise than Layer 2. On current SDK versions this never fires
-  // because no <audio> element exists; Layer 2 handles everything.
+  // Layer 1: native <audio> 'playing' event (passive — fires only if the
+  // SDK exposes an HTMLMediaElement, which current versions do not).
   const tryAudio = (el) => {
     if (!el.paused) { done(); return; }
     el.addEventListener('playing', done, { once: true });
@@ -941,11 +943,7 @@ async function playClip() {
   observer.observe(document.documentElement, { childList: true, subtree: true });
   document.querySelectorAll('audio').forEach(tryAudio);
 
-  // ── Layer 2: player_state_changed → position-advance poll ─────────────
-  // When player_state_changed fires (SDK has started buffering), capture
-  // the current position as sdkStartPos, then poll getCurrentState() every
-  // 50 ms until position >= sdkStartPos + SDK_BUFFER_MS. At that point the
-  // buffer has drained through to the speakers and audio is audible.
+  // Layer 2: player_state_changed → position-advance poll.
   const onSDKState = (state) => {
     if (confirmed) return;
     if (!state || state.paused) return;
@@ -953,7 +951,6 @@ async function playClip() {
     if (state.position < targetStart) return;
 
     const sdkStartPos = state.position;
-    // Remove this listener; the polling loop takes over from here.
     sdkPlayer.removeListener('player_state_changed', onSDKState);
 
     (async () => {
@@ -970,12 +967,10 @@ async function playClip() {
   };
   sdkPlayer.addListener('player_state_changed', onSDKState);
 
-  // Hard fallback: unblock the UI if neither layer fires within 8 s.
   const fallbackId = setTimeout(done, 8000);
 
-  // ── Send the play command ─────────────────────────────────────────────
-  // All listeners above are registered synchronously before this point,
-  // so no signal can fire and be missed during the network round-trip.
+  // Send the play command. All listeners above are registered synchronously
+  // before this point so no signal can be missed during the network round-trip.
   const r = await spotifyPut('/me/player/play?device_id=' + sdkDeviceId, {
     uris:         ['spotify:track:' + targetTrackId],
     position_ms:  targetStart,
@@ -988,20 +983,16 @@ async function playClip() {
     return;
   }
 
-  // ── Wait until audio is confirmed audible ─────────────────────────────
+  // Wait until audio is confirmed audible (buffer drained).
   await audioStarted;
 
   if (clipGeneration !== thisGen) return;
 
   setStatus('Playing…');
 
-  // done() fires at the moment audio becomes audible (Layer 1) or after
-  // the buffer has drained (Layer 2), so no overshoot adjustment is needed.
-  // Start bar and pause timer for exactly clipSec seconds from right now.
-  wrap.style.display   = 'block';
-  bar.style.transition = 'none';
-  bar.style.width      = '100%';
-  bar.getBoundingClientRect(); // force reflow so the transition fires correctly
+  // FIX: bar is already visible and full from the snap above. Now start the
+  // countdown animation from exactly this moment — no show/hide needed.
+  bar.getBoundingClientRect(); // force reflow so transition fires correctly
   bar.style.transition = `width ${clipSec}s linear`;
   bar.style.width      = '0%';
 

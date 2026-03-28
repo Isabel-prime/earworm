@@ -714,7 +714,7 @@ async function loadPlaylist() {
 
   while (true) {
     const data = await spotifyGet(
-      `/playlists/${pid}/tracks?limit=${limit}&offset=${offset}`
+      `/playlists/${pid}/items?limit=${limit}&offset=${offset}`
     );
 
     if (!data) { setStatus('Could not load playlist. Check the URL.', true); return; }

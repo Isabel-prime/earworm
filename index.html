@@ -794,7 +794,7 @@ async function fetchUserPlaylists() {
   for (const pl of owned) {
     const opt = document.createElement('option');
     opt.value       = pl.id;
-    opt.textContent = `${pl.name} (${pl.tracks.total})`;
+    opt.textContent = `${pl.name} (${pl.items.total})`;
     select.appendChild(opt);
   }
 

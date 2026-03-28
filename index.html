@@ -546,23 +546,21 @@ const SCOPES = [
 // ═══════════════════════════════════════════════════════
 //  STATE
 // ═══════════════════════════════════════════════════════
-let accessToken   = null;
-let clientId      = null;
-let userProfile   = null;   // logged-in user's profile (id, display_name, etc.)
-let playlist      = [];     // array of {id, name, artist, duration_ms}
-let currentTrack  = null;
-let clipStartMs   = 0;
-let selectedSec   = 10;
-let scoreCorrect  = 0;
-let scoreTotal    = 0;
-let playTimer     = null;
-let revealed      = false;
-let scored        = false;  // FIX (bug 3): track whether this song has been counted yet
-let clipGeneration = 0;     // FIX (progress bar): incremented on each playClip() call so
-                             // stale polling loops from a previous call know to abort
-let sdkPlayer     = null;   // Spotify.Player instance
-let sdkDeviceId   = null;   // this browser tab's device ID
-let sdkReady      = false;
+let accessToken  = null;
+let clientId     = null;
+let userProfile  = null;   // logged-in user's profile (id, display_name, etc.)
+let playlist     = [];   // array of {id, name, artist, duration_ms}
+let currentTrack = null;
+let clipStartMs  = 0;
+let selectedSec  = 10;
+let scoreCorrect = 0;
+let scoreTotal   = 0;
+let playTimer    = null;
+let revealed     = false;
+let scored       = false;  // FIX (bug 3): track whether this song has been counted yet
+let sdkPlayer    = null;   // Spotify.Player instance
+let sdkDeviceId  = null;   // this browser tab's device ID
+let sdkReady     = false;
 
 // ═══════════════════════════════════════════════════════
 //  PKCE HELPERS
@@ -913,22 +911,16 @@ async function playClip() {
     return;
   }
   clearTimeout(playTimer);
-
-  // Increment the generation counter so any polling loop that is still
-  // running from a previous playClip() call knows it has been superseded
-  // and should abort without touching the UI.
-  clipGeneration++;
-  const thisGen = clipGeneration;
-
+  // Reset bar immediately so it doesn't show stale state
   const wrap = document.getElementById('progress-wrap');
   const bar  = document.getElementById('progress-bar');
-
-  // Keep the bar hidden until we have confirmed that audio is actually
-  // playing — showing it before then was the root cause of the bug.
-  wrap.style.display = 'none';
+  wrap.style.display   = 'block';
+  bar.style.transition = 'none';
+  bar.style.width      = '100%';
 
   setStatus('Starting playback…');
 
+  // Tell Spotify to play this track at clipStartMs on our SDK device
   const r = await spotifyPut('/me/player/play?device_id=' + sdkDeviceId, {
     uris:         ['spotify:track:' + currentTrack.id],
     position_ms:  clipStartMs,
@@ -937,82 +929,38 @@ async function playClip() {
   if (r && !r.ok && r.status !== 204) {
     const err = await r.json().catch(() => ({}));
     setStatus('Playback error: ' + (err.error?.message || r.status), true);
+    wrap.style.display = 'none';
     return;
   }
 
+  // Wait for the SDK to confirm playback has actually started before
+  // starting the progress bar and the pause timer.
   const clipSec = selectedSec;
-
-  // Poll getCurrentState() until the playback position starts advancing.
-  // player_state_changed fires as soon as the SDK acknowledges the command,
-  // which can be before audio has actually buffered and started outputting.
-  // Watching the position move is a reliable signal that audio is live.
-  let detectedPosition = null;
-  await new Promise(resolve => {
-    const giveUp = Date.now() + 6000;
-    let prevPosition = null;
-
-    const poll = async () => {
-      // Abort if a newer playClip() call has started, or we've timed out.
-      if (clipGeneration !== thisGen) { resolve(); return; }
-      if (Date.now() > giveUp)        { resolve(); return; }
-
-      const state = await sdkPlayer.getCurrentState();
-
-      if (!state || state.paused) {
-        setTimeout(poll, 100);
-        return;
-      }
-
-      if (prevPosition === null) {
-        // First non-paused sample — take a baseline and check again shortly.
-        prevPosition = state.position;
-        setTimeout(poll, 100);
-        return;
-      }
-
-      if (state.position > prevPosition) {
-        // Position has advanced: audio is genuinely playing.
-        detectedPosition = state.position;
+  const waitForPlay = new Promise(resolve => {
+    const onStateChange = state => {
+      if (state && !state.paused) {
+        sdkPlayer.removeListener('player_state_changed', onStateChange);
         resolve();
-      } else {
-        prevPosition = state.position;
-        setTimeout(poll, 100);
       }
     };
-
-    poll();
+    sdkPlayer.addListener('player_state_changed', onStateChange);
+    // Safety fallback: start anyway after 3s if event never fires
+    setTimeout(resolve, 3000);
   });
 
-  // If a newer playClip() call arrived while we were polling, bail out now
-  // rather than starting a bar/timer that would fight with the newer call.
-  if (clipGeneration !== thisGen) return;
-
+  await waitForPlay;
   setStatus('Playing…');
 
-  // detectedPosition is where the track was when we first confirmed movement.
-  // Any audio between clipStartMs and detectedPosition already played during
-  // the detection window, so we subtract it from the remaining budget.
-  // This ensures the user always hears exactly clipSec seconds of audio.
-  const alreadyPlayedMs   = detectedPosition !== null
-    ? Math.max(0, detectedPosition - clipStartMs)
-    : 0;
-  const remainingMs       = Math.max(100, clipSec * 1000 - alreadyPlayedMs);
-  const remainingFraction = remainingMs / (clipSec * 1000);
-
-  // Show the bar starting at the proportional position (not necessarily 100%
-  // if some audio already played) and animate smoothly down to 0.
-  wrap.style.display   = 'block';
-  bar.style.transition = 'none';
-  bar.style.width      = `${remainingFraction * 100}%`;
-  bar.getBoundingClientRect(); // force reflow so the transition fires correctly
-  bar.style.transition = `width ${remainingMs / 1000}s linear`;
+  // Now start the bar animation
+  bar.getBoundingClientRect(); // force reflow
+  bar.style.transition = `width ${clipSec}s linear`;
   bar.style.width      = '0%';
 
-  // Pause after exactly the remaining clip duration.
+  // Pause via SDK after clip duration
   playTimer = setTimeout(() => {
     sdkPlayer.pause();
     setStatus('Clip ended — make your guess!');
-  }, remainingMs);
+  }, clipSec * 1000);
 }
 
 function checkGuess() {

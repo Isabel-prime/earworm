@@ -1042,11 +1042,12 @@ function checkGuess() {
   const rawGuess = document.getElementById('guess-input').value.trim();
   if (!rawGuess) return;
 
-  const guess  = normalizeForMatching(rawGuess);
-  const answer = normalizeForMatching(currentTrack.name);
-
-  const correct = answer.includes(guess) || guess.includes(answer) ||
-    levenshtein(guess, answer) <= Math.floor(answer.length * 0.25);
+  // FIX: exact normalised match only. The fuzzy (includes / Levenshtein)
+  // logic that was here before caused false positives whenever two song
+  // titles shared a long common substring (e.g. "(Taylor's Version)").
+  // The autocomplete fills in the precise title, so an exact normalised
+  // comparison is both sufficient and correct.
+  const correct = normalizeForMatching(rawGuess) === normalizeForMatching(currentTrack.name);
 
   const banner = document.getElementById('result-banner');
   if (correct) {

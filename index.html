@@ -254,9 +254,63 @@
 
     /* ── Guess area ── */
     .guess-row {
-      display: flex; gap: 8px;
+      display: flex;
+      gap: 8px;
     }
-    .guess-row input { flex: 1; }
+
+    /* ── Autocomplete ── */
+    .autocomplete-wrap {
+      position: relative;
+      flex: 1;
+      min-width: 0;
+    }
+    /* When the dropdown is open, square off the input's bottom corners so
+       it visually connects with the dropdown panel below it. */
+    .autocomplete-wrap.open input[type="text"] {
+      border-bottom-left-radius: 0;
+      border-bottom-right-radius: 0;
+    }
+    .autocomplete-dropdown {
+      display: none;
+      position: absolute;
+      top: 100%;
+      left: 0;
+      right: 0;
+      z-index: 100;
+      background: var(--surface2);
+      border: 1px solid var(--amber);
+      border-top: none;
+      border-radius: 0 0 var(--radius) var(--radius);
+      max-height: 220px;
+      overflow-y: auto;
+    }
+    .autocomplete-item {
+      padding: 8px 14px;
+      cursor: pointer;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      border-bottom: 1px solid var(--border);
+    }
+    .autocomplete-item:last-child { border-bottom: none; }
+    .autocomplete-item:hover,
+    .autocomplete-item.active { background: rgba(168,85,247,0.15); }
+    .item-name {
+      font-family: 'IBM Plex Mono', monospace;
+      font-size: 12px;
+      color: var(--text);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .item-artist {
+      font-family: 'IBM Plex Mono', monospace;
+      font-size: 10px;
+      color: var(--muted);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
 
     /* ── Result banner ── */
     .result-banner {
@@ -448,15 +502,12 @@
   <div class="card" id="setup-card">
     <div class="card-label">Playlist</div>
 
-    <!-- Dropdown of owned playlists -->
     <select id="playlist-select" onchange="onPlaylistSelect(this)" disabled>
       <option value="">— loading your playlists… —</option>
     </select>
 
-    <!-- Divider -->
     <div class="or-divider mt12">or enter url manually</div>
 
-    <!-- Manual URL input -->
     <div class="mt12">
       <input type="text" id="playlist-input"
         placeholder="Spotify playlist URL or ID…"
@@ -473,7 +524,6 @@
   <!-- ══ GAME CARD ══ -->
   <div class="card" id="game-card">
 
-    <!-- Duration picker -->
     <div class="card-label">Clip Length</div>
     <div class="duration-grid" id="dur-grid">
       <button class="dur-btn" data-sec="1"  onclick="selectDuration(this)">1s</button>
@@ -483,7 +533,6 @@
       <button class="dur-btn active" data-sec="10" onclick="selectDuration(this)">10s</button>
     </div>
 
-    <!-- Play row -->
     <div class="play-row mt16">
       <button class="play-ring" id="play-btn" onclick="playClip()" disabled title="Play clip">
         <svg width="28" height="28" viewBox="0 0 24 24" fill="#fff">
@@ -497,23 +546,26 @@
       </div>
     </div>
 
-    <!-- Progress bar — always in the layout, never hidden -->
     <div id="progress-wrap"><div class="progress-bar" id="progress-bar"></div></div>
 
     <div class="divider mt16"></div>
 
-    <!-- Guess area -->
     <div class="card-label mt12">Your Guess</div>
+
+    <!-- autocomplete-wrap makes the input the anchor for the dropdown -->
     <div class="guess-row">
-      <input type="text" id="guess-input" placeholder="Song name…"
-        onkeydown="if(event.key==='Enter')checkGuess()" />
+      <div class="autocomplete-wrap" id="autocomplete-wrap">
+        <input type="text" id="guess-input" placeholder="Song name…"
+          oninput="updateAutocomplete()"
+          onkeydown="onGuessKeydown(event)"
+          autocomplete="off" spellcheck="false" />
+        <div class="autocomplete-dropdown" id="autocomplete-dropdown"></div>
+      </div>
       <button class="btn btn-secondary" onclick="checkGuess()">Check</button>
     </div>
 
-    <!-- Result banner -->
     <div class="result-banner mt12" id="result-banner"></div>
 
-    <!-- Action buttons -->
     <div class="flex-gap mt12">
       <button class="btn btn-ghost" style="flex:1" onclick="revealAnswer()">Reveal</button>
       <button class="btn btn-secondary" style="flex:1" onclick="nextSong()">Next Song →</button>
@@ -521,7 +573,6 @@
 
   </div>
 
-  <!-- Disconnect -->
   <div id="disconnect-row" style="display:none; text-align:center;">
     <button class="btn btn-ghost" onclick="disconnect()">↩ Disconnect</button>
   </div>
@@ -542,22 +593,23 @@ const SCOPES = [
 // ═══════════════════════════════════════════════════════
 //  STATE
 // ═══════════════════════════════════════════════════════
-let accessToken    = null;
-let clientId       = null;
-let userProfile    = null;
-let playlist       = [];
-let currentTrack   = null;
-let clipStartMs    = 0;
-let selectedSec    = 10;
-let scoreCorrect   = 0;
-let scoreTotal     = 0;
-let playTimer      = null;
-let revealed       = false;
-let scored         = false;
-let clipGeneration = 0;
-let sdkPlayer      = null;
-let sdkDeviceId    = null;
-let sdkReady       = false;
+let accessToken      = null;
+let clientId         = null;
+let userProfile      = null;
+let playlist         = [];
+let currentTrack     = null;
+let clipStartMs      = 0;
+let selectedSec      = 10;
+let scoreCorrect     = 0;
+let scoreTotal       = 0;
+let playTimer        = null;
+let revealed         = false;
+let scored           = false;
+let clipGeneration   = 0;
+let autocompleteIndex = -1;   // index of the highlighted autocomplete item (-1 = none)
+let sdkPlayer        = null;
+let sdkDeviceId      = null;
+let sdkReady         = false;
 
 // ═══════════════════════════════════════════════════════
 //  PKCE HELPERS
@@ -769,7 +821,7 @@ async function fetchUserPlaylists() {
   for (const pl of owned) {
     const opt = document.createElement('option');
     opt.value       = pl.id;
-    opt.textContent = `${pl.name} (${pl.items.total})`; // FIX: items.total per new API
+    opt.textContent = `${pl.name} (${pl.items.total})`;
     select.appendChild(opt);
   }
   select.disabled = false;
@@ -860,6 +912,9 @@ function pickNextSong() {
   document.getElementById('guess-input').value         = '';
   document.getElementById('result-banner').className   = 'result-banner mt12';
   document.getElementById('result-banner').textContent = '';
+
+  // Always reset autocomplete when a new song is picked
+  hideAutocomplete();
 
   const bar = document.getElementById('progress-bar');
   bar.style.transition = 'none';
@@ -987,8 +1042,6 @@ function checkGuess() {
   const rawGuess = document.getElementById('guess-input').value.trim();
   if (!rawGuess) return;
 
-  // Normalise both strings before comparing so that e.g. "&" vs "and"
-  // and "22" vs "twenty-two" are treated as equivalent.
   const guess  = normalizeForMatching(rawGuess);
   const answer = normalizeForMatching(currentTrack.name);
 
@@ -1010,6 +1063,11 @@ function checkGuess() {
     banner.className = 'result-banner mt12 wrong';
     banner.innerHTML = `✗ Not quite. Try again or reveal the answer.`;
   }
+
+  // Dismiss the autocomplete and return keyboard focus to the page so
+  // that Space / R / ArrowRight shortcuts work immediately after guessing.
+  hideAutocomplete();
+  document.getElementById('guess-input').blur();
 }
 
 function revealAnswer() {
@@ -1030,6 +1088,7 @@ function revealSong() {
   document.getElementById('track-name').textContent   = currentTrack.name;
   document.getElementById('track-artist').textContent = currentTrack.artist;
   document.getElementById('track-hint').textContent   = `starts at ${formatMs(clipStartMs)}`;
+  hideAutocomplete();
 }
 
 function nextSong() {
@@ -1041,6 +1100,136 @@ function nextSong() {
 function updateScore() {
   document.getElementById('score-correct').textContent = scoreCorrect;
   document.getElementById('score-total').textContent   = scoreTotal;
+}
+
+// ═══════════════════════════════════════════════════════
+//  AUTOCOMPLETE
+// ═══════════════════════════════════════════════════════
+
+// Return up to 6 tracks from the playlist whose normalised names best match
+// the query. Ranked: exact > starts-with > contains > word-starts-with.
+// Duplicates (same normalised name) are collapsed to one entry.
+function getSearchResults(query) {
+  if (!query || !playlist.length) return [];
+  const normQuery = normalizeForMatching(query);
+  if (!normQuery) return [];
+
+  // Deduplicate by normalised title so repeated tracks don't flood the list
+  const seen   = new Set();
+  const unique = [];
+  for (const track of playlist) {
+    const key = normalizeForMatching(track.name);
+    if (!seen.has(key)) { seen.add(key); unique.push(track); }
+  }
+
+  const results = [];
+  for (const track of unique) {
+    const normName = normalizeForMatching(track.name);
+    let score;
+    if (normName === normQuery)              score = 0; // exact
+    else if (normName.startsWith(normQuery)) score = 1; // title starts with query
+    else if (normName.includes(normQuery))   score = 2; // title contains query
+    else if (normName.split(/\s+/).some(w => w.startsWith(normQuery))) score = 3; // a word starts with query
+    else continue; // no usable match
+    results.push({ track, score });
+  }
+
+  return results
+    .sort((a, b) => a.score - b.score)
+    .slice(0, 6)
+    .map(r => r.track);
+}
+
+// Rebuild and show the dropdown based on what is currently in the input.
+function updateAutocomplete() {
+  const query    = document.getElementById('guess-input').value.trim();
+  const wrap     = document.getElementById('autocomplete-wrap');
+  const dropdown = document.getElementById('autocomplete-dropdown');
+
+  if (!query || revealed) { hideAutocomplete(); return; }
+
+  const results = getSearchResults(query);
+  if (results.length === 0) { hideAutocomplete(); return; }
+
+  autocompleteIndex = -1;
+  dropdown.innerHTML = '';
+
+  for (const track of results) {
+    const item = document.createElement('div');
+    item.className       = 'autocomplete-item';
+    item.dataset.name    = track.name; // store original for retrieval
+    item.innerHTML =
+      `<span class="item-name">${escapeHtml(track.name)}</span>` +
+      `<span class="item-artist">${escapeHtml(track.artist)}</span>`;
+
+    // mousedown + preventDefault keeps the input focused while the user
+    // clicks a result, so the blur handler doesn't fire prematurely.
+    item.addEventListener('mousedown', e => {
+      e.preventDefault();
+      selectAutocompleteItem(track.name);
+    });
+    dropdown.appendChild(item);
+  }
+
+  wrap.classList.add('open');
+  dropdown.style.display = 'block';
+}
+
+function hideAutocomplete() {
+  const wrap     = document.getElementById('autocomplete-wrap');
+  const dropdown = document.getElementById('autocomplete-dropdown');
+  if (wrap)     wrap.classList.remove('open');
+  if (dropdown) dropdown.style.display = 'none';
+  autocompleteIndex = -1;
+}
+
+// Fill the input with the chosen title and immediately check the guess.
+function selectAutocompleteItem(name) {
+  document.getElementById('guess-input').value = name;
+  hideAutocomplete();
+  checkGuess();
+}
+
+// Keydown handler attached directly to the guess input.
+// Handles autocomplete navigation and prevents the Enter-to-check logic
+// from conflicting with dropdown selection.
+function onGuessKeydown(e) {
+  const dropdown = document.getElementById('autocomplete-dropdown');
+  const isOpen   = dropdown.style.display === 'block';
+  const items    = Array.from(dropdown.querySelectorAll('.autocomplete-item'));
+
+  if (e.key === 'ArrowDown') {
+    if (!isOpen) return;
+    e.preventDefault();
+    autocompleteIndex = Math.min(autocompleteIndex + 1, items.length - 1);
+    items.forEach((item, i) => item.classList.toggle('active', i === autocompleteIndex));
+    if (autocompleteIndex >= 0) items[autocompleteIndex].scrollIntoView({ block: 'nearest' });
+    return;
+  }
+
+  if (e.key === 'ArrowUp') {
+    if (!isOpen) return;
+    e.preventDefault();
+    autocompleteIndex = Math.max(autocompleteIndex - 1, 0);
+    items.forEach((item, i) => item.classList.toggle('active', i === autocompleteIndex));
+    if (autocompleteIndex >= 0) items[autocompleteIndex].scrollIntoView({ block: 'nearest' });
+    return;
+  }
+
+  if (e.key === 'Escape') {
+    hideAutocomplete();
+    return;
+  }
+
+  if (e.key === 'Enter') {
+    if (isOpen && items.length > 0) {
+      // Select highlighted item, or the first item if none highlighted
+      const idx = autocompleteIndex >= 0 ? autocompleteIndex : 0;
+      selectAutocompleteItem(items[idx].dataset.name);
+    } else {
+      checkGuess();
+    }
+  }
 }
 
 // ═══════════════════════════════════════════════════════
@@ -1058,20 +1247,18 @@ function formatMs(ms) {
   return `${m}:${String(s % 60).padStart(2, '0')}`;
 }
 
-// Normalise a string for fuzzy answer matching.
-// Applied to both the guess and the song title before any comparison so
-// that surface differences in phrasing don't cause a correct answer to fail.
+function escapeHtml(str) {
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
 function normalizeForMatching(str) {
   str = str.toLowerCase();
-
-  // Treat & and "and" as interchangeable.
   str = str.replace(/&/g, 'and');
 
-  // Convert number words to digits (0–99) so that e.g. "twenty-two",
-  // "twenty two", and "22" all reduce to the same string before comparison.
-  // Replacements run in three passes — compound before single-tens before
-  // ones/teens — so that e.g. "twenty" is not consumed before "twenty-two"
-  // has had a chance to match.
   const onesMap = {
     'zero':0,'one':1,'two':2,'three':3,'four':4,'five':5,'six':6,
     'seven':7,'eight':8,'nine':9,'ten':10,'eleven':11,'twelve':12,
@@ -1084,26 +1271,21 @@ function normalizeForMatching(str) {
   };
 
   const tensKeys = Object.keys(tensMap).join('|');
-
-  // ones that can follow a tens word to form a compound (1–9 only)
   const compOnes = Object.keys(onesMap)
     .filter(k => onesMap[k] >= 1 && onesMap[k] <= 9).join('|');
-
-  const allOnes = Object.keys(onesMap).join('|');
+  const allOnes  = Object.keys(onesMap).join('|');
 
   // Pass 1 — compound: "twenty-two" / "twenty two" → "22"
   str = str.replace(
     new RegExp(`\\b(${tensKeys})[-\\s](${compOnes})\\b`, 'g'),
     (_, t, o) => String(tensMap[t] + onesMap[o])
   );
-
-  // Pass 2 — single tens: "twenty" → "20"
+  // Pass 2 — bare tens: "twenty" → "20"
   str = str.replace(
     new RegExp(`\\b(${tensKeys})\\b`, 'g'),
     (_, t) => String(tensMap[t])
   );
-
-  // Pass 3 — ones and teens: "one" → "1", "eleven" → "11", etc.
+  // Pass 3 — ones / teens: "one" → "1", "eleven" → "11", etc.
   str = str.replace(
     new RegExp(`\\b(${allOnes})\\b`, 'g'),
     (_, o) => String(onesMap[o])
@@ -1133,6 +1315,13 @@ window.addEventListener('DOMContentLoaded', () => {
 
   const savedId = localStorage.getItem('ew_client_id');
   if (savedId) document.getElementById('client-id-input').value = savedId;
+
+  // Hide the autocomplete if the user clicks or tabs away from the input.
+  // The 150 ms delay lets a mousedown on a dropdown item fire first so that
+  // selectAutocompleteItem() can act before the dropdown disappears.
+  document.getElementById('guess-input').addEventListener('blur', () => {
+    setTimeout(hideAutocomplete, 150);
+  });
 
   document.addEventListener('keydown', e => {
     const guessFocused = document.activeElement === document.getElementById('guess-input');

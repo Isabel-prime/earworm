@@ -135,6 +135,49 @@
     input[type="text"]:focus { border-color: var(--amber); }
     input[type="text"]::placeholder { color: var(--muted); }
 
+    /* ── Playlist dropdown ── */
+    select {
+      width: 100%;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 11px 14px;
+      padding-right: 36px;
+      color: var(--text);
+      font-family: 'IBM Plex Mono', monospace;
+      font-size: 13px;
+      outline: none;
+      transition: border-color 0.15s;
+      cursor: pointer;
+      appearance: none;
+      -webkit-appearance: none;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='%236b6560'%3E%3Cpath d='M7 10l5 5 5-5z'/%3E%3C/svg%3E");
+      background-repeat: no-repeat;
+      background-position: right 12px center;
+    }
+    select:focus { border-color: var(--amber); }
+    select option { background: var(--surface2); color: var(--text); }
+    select:disabled { opacity: 0.45; cursor: not-allowed; }
+
+    /* ── Or divider ── */
+    .or-divider {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      color: var(--muted);
+      font-family: 'IBM Plex Mono', monospace;
+      font-size: 10px;
+      letter-spacing: 2px;
+      text-transform: uppercase;
+    }
+    .or-divider::before,
+    .or-divider::after {
+      content: '';
+      flex: 1;
+      height: 1px;
+      background: var(--border);
+    }
+
     /* ── Clip duration picker ── */
     .duration-grid {
       display: grid;
@@ -405,9 +448,21 @@
   <!-- ══ SETUP CARD ══ -->
   <div class="card" id="setup-card">
     <div class="card-label">Playlist</div>
-    <input type="text" id="playlist-input"
-      placeholder="Spotify playlist URL or ID…"
-      autocomplete="off" spellcheck="false" />
+
+    <!-- Dropdown of owned playlists -->
+    <select id="playlist-select" onchange="onPlaylistSelect(this)" disabled>
+      <option value="">— loading your playlists… —</option>
+    </select>
+
+    <!-- Divider -->
+    <div class="or-divider mt12">or enter url manually</div>
+
+    <!-- Manual URL input -->
+    <div class="mt12">
+      <input type="text" id="playlist-input"
+        placeholder="Spotify playlist URL or ID…"
+        autocomplete="off" spellcheck="false" />
+    </div>
     <div class="mt8">
       <small>e.g. https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M</small>
     </div>
@@ -493,6 +548,7 @@ const SCOPES = [
 // ═══════════════════════════════════════════════════════
 let accessToken  = null;
 let clientId     = null;
+let userProfile  = null;   // logged-in user's profile (id, display_name, etc.)
 let playlist     = [];   // array of {id, name, artist, duration_ms}
 let currentTrack = null;
 let clipStartMs  = 0;
@@ -666,6 +722,9 @@ function showGameUI() {
   if (window.Spotify) {
     initSDK();
   }
+
+  // Populate the playlist dropdown from the user's account
+  fetchUserPlaylists();
 }
 
 // ═══════════════════════════════════════════════════════
@@ -690,6 +749,66 @@ async function spotifyPut(path, body) {
     body: body ? JSON.stringify(body) : undefined,
   });
   return res;
+}
+
+// ═══════════════════════════════════════════════════════
+//  PLAYLIST DROPDOWN
+// ═══════════════════════════════════════════════════════
+async function fetchUserPlaylists() {
+  const select = document.getElementById('playlist-select');
+
+  // Fetch the logged-in user's profile so we know their ID
+  const profile = await spotifyGet('/me');
+  if (!profile) {
+    select.innerHTML = '<option value="">— could not load playlists —</option>';
+    return;
+  }
+  userProfile = profile;
+
+  // Page through /me/playlists and keep only ones the user owns
+  const owned  = [];
+  let offset   = 0;
+  const limit  = 50;
+
+  while (true) {
+    const data = await spotifyGet(`/me/playlists?limit=${limit}&offset=${offset}`);
+    if (!data) break;
+
+    for (const pl of data.items || []) {
+      if (!pl || !pl.owner) continue;
+      if (pl.owner.id === profile.id) owned.push(pl);
+    }
+
+    offset += limit;
+    if (!data.next) break;
+  }
+
+  // Rebuild the select options
+  select.innerHTML = '<option value="">— select a playlist —</option>';
+
+  if (owned.length === 0) {
+    select.innerHTML = '<option value="">— no owned playlists found —</option>';
+    return;
+  }
+
+  for (const pl of owned) {
+    const opt = document.createElement('option');
+    opt.value       = pl.id;
+    opt.textContent = `${pl.name} (${pl.tracks.total})`;
+    select.appendChild(opt);
+  }
+
+  select.disabled = false;
+}
+
+// Called when the user picks an entry from the dropdown.
+// Populates the URL input and immediately kicks off loading.
+function onPlaylistSelect(el) {
+  const id = el.value;
+  if (!id) return;
+  document.getElementById('playlist-input').value =
+    'https://open.spotify.com/playlist/' + id;
+  loadPlaylist();
 }
 
 // ═══════════════════════════════════════════════════════

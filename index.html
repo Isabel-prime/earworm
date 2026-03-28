@@ -714,7 +714,7 @@ async function loadPlaylist() {
 
   while (true) {
     const data = await spotifyGet(
-      `/playlists/${pid}/tracks?limit=${limit}&offset=${offset}&fields=total,items(track(id,name,artists,duration_ms,is_local))`
+      `/playlists/${pid}/tracks?limit=${limit}&offset=${offset}`
     );
 
     if (!data) { setStatus('Could not load playlist. Check the URL.', true); return; }
@@ -731,7 +731,7 @@ async function loadPlaylist() {
     }
 
     offset += limit;
-    if (offset >= data.total) break;
+    if (!data.next) break;
   }
 
   if (playlist.length === 0) {

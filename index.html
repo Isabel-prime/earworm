@@ -709,12 +709,13 @@ async function loadPlaylist() {
 
   setStatus('Loading playlist…');
   playlist = [];
-  let url  = `/playlists/${pid}/tracks?limit=100&fields=next,items(track(id,name,artists,duration_ms,is_local))`;
+  let offset = 0;
+  const limit = 100;
 
-  while (url) {
-    const data = url.startsWith('http')
-      ? await fetch(url, { headers: { Authorization: 'Bearer ' + accessToken } }).then(r => r.json())
-      : await spotifyGet(url);
+  while (true) {
+    const data = await spotifyGet(
+      `/playlists/${pid}/tracks?limit=${limit}&offset=${offset}&fields=total,items(track(id,name,artists,duration_ms,is_local))`
+    );
 
     if (!data) { setStatus('Could not load playlist. Check the URL.', true); return; }
 
@@ -728,7 +729,9 @@ async function loadPlaylist() {
         duration_ms: t.duration_ms,
       });
     }
-    url = data.next || null;
+
+    offset += limit;
+    if (offset >= data.total) break;
   }
 
   if (playlist.length === 0) {

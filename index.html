@@ -911,76 +911,126 @@ async function playClip() {
   wrap.style.display = 'none';
   setStatus('Starting playback…');
 
-  const clipSec = selectedSec;
+  const clipSec       = selectedSec;
+  const targetTrackId = currentTrack.id;
+  const targetStart   = clipStartMs;
 
-  // ── The critical ordering fix ────────────────────────────────────────────
+  // ── Build detection promise before sending the play command ─────────────
   //
-  // fetch() dispatches the HTTP request synchronously at the point it is
-  // called; the 'await' below only suspends execution while waiting for the
-  // RESPONSE to come back over the network.  The Spotify SDK maintains its
-  // own persistent WebSocket connection to Spotify's servers and can receive
-  // the "start playing" instruction — and fire the 'playing' event on its
-  // <audio> element — during that suspension window, before our listener
-  // would be attached if we set it up afterwards.
+  // Two independent layers race each other; whichever fires first wins.
+  // Both are wired up synchronously here so neither can fire and be missed
+  // while we are suspended inside the spotifyPut await below.
   //
-  // Solution: build the audioStarted promise and attach the 'playing'
-  // listener synchronously HERE, before spotifyPut() is ever called.
-  // JavaScript is single-threaded, so nothing else can run between this
-  // line and the spotifyPut() call below — the listener is guaranteed to
-  // be in place before the SDK can act on the command.
+  // Layer 1 — native <audio> 'playing' event.
+  //   The browser fires this at the exact moment audio samples reach the
+  //   speaker pipeline.  This is the most accurate signal available.
+  //   However, the Spotify SDK often runs inside a sandboxed cross-origin
+  //   <iframe> for DRM isolation; in that case document.querySelector('audio')
+  //   returns null (cross-origin iframes are invisible to the parent page)
+  //   and this layer silently produces nothing.  A MutationObserver covers
+  //   the less common case where the SDK creates its <audio> element lazily
+  //   in the main document after the play command is issued.
+  //
+  // Layer 2 — SDK player_state_changed event.
+  //   Always reachable via the SDK's JS API regardless of iframe sandboxing.
+  //   Fires just before audio is audible (the SDK's state machine advances
+  //   slightly ahead of the audio pipeline).  We only accept the event once
+  //   state.position >= targetStart, which confirms the seek has completed
+  //   and the right part of the track is actually playing.
+  //
+  // Fallback — if neither layer fires within 6 s (e.g. extreme network
+  //   stall), resolve anyway so the UI does not hang permanently.
   // ────────────────────────────────────────────────────────────────────────
-  const audioEl = document.querySelector('audio');
 
-  const audioStarted = new Promise(resolve => {
-    let fallbackId;
-    // 'done' is used as both the 'playing' callback and the fallback — it is
-    // safe to call multiple times since resolving an already-resolved Promise
-    // is a no-op, and clearTimeout on an already-fired timer is also a no-op.
-    const done = () => { clearTimeout(fallbackId); resolve(); };
+  let confirmed    = false;
+  let resolveStart;
+  const audioStarted = new Promise(r => { resolveStart = r; });
 
-    // 5-second safety net for the rare case where 'playing' never fires
-    // (e.g. extreme network latency, or the SDK silently failing to start).
-    fallbackId = setTimeout(done, 5000);
+  // done() is the single resolution point shared by all layers.
+  // pos is the confirmed playback position at resolution time; it is used
+  // below to subtract any overshoot from the clip timer.
+  const done = (pos = targetStart) => {
+    if (confirmed) return;
+    confirmed = true;
+    clearTimeout(fallbackId);
+    observer.disconnect();
+    sdkPlayer.removeListener('player_state_changed', onSDKState);
+    resolveStart(pos);
+  };
 
-    if (audioEl) {
-      audioEl.addEventListener('playing', done, { once: true });
-    }
-    // If audioEl is null (should not happen once sdkReady is true) we
-    // rely solely on the fallback timeout.
+  // Layer 2: SDK state handler (defined before addListener call below)
+  const onSDKState = (state) => {
+    if (!state || state.paused) return;
+    if (state.track_window?.current_track?.id !== targetTrackId) return;
+    if (state.position < targetStart) return;
+    done(state.position);
+  };
+
+  // Layer 1: attach to an audio element; also check if already playing
+  // (covers the edge case where the element exists and is unpaused before
+  // we attach the listener — e.g. a rapid double-press of the play button)
+  const tryAudio = (el) => {
+    if (!el.paused) { done(targetStart); return; }
+    el.addEventListener('playing', () => done(targetStart), { once: true });
+  };
+
+  // MutationObserver catches <audio> elements created after this point
+  const observer = new MutationObserver(mutations => {
+    for (const m of mutations)
+      for (const n of m.addedNodes) {
+        if (n.nodeType !== 1) continue;          // skip non-element nodes
+        if (n.nodeName === 'AUDIO') tryAudio(n);
+        n.querySelectorAll('audio').forEach(tryAudio);
+      }
   });
 
-  // Send the play command. The listener above is already in place.
+  // fallbackId must be defined before tryAudio runs below, because
+  // tryAudio → done() → clearTimeout(fallbackId)
+  const fallbackId = setTimeout(() => done(targetStart), 6000);
+
+  // Register all listeners (synchronous — nothing else can run until
+  // we hit the first await, so no signal can be missed)
+  sdkPlayer.addListener('player_state_changed', onSDKState);
+  observer.observe(document.documentElement, { childList: true, subtree: true });
+  document.querySelectorAll('audio').forEach(tryAudio);
+
+  // ── Send the play command ───────────────────────────────────────────────
   const r = await spotifyPut('/me/player/play?device_id=' + sdkDeviceId, {
-    uris:         ['spotify:track:' + currentTrack.id],
-    position_ms:  clipStartMs,
+    uris:         ['spotify:track:' + targetTrackId],
+    position_ms:  targetStart,
   });
 
   if (r && !r.ok && r.status !== 204) {
     const err = await r.json().catch(() => ({}));
     setStatus('Playback error: ' + (err.error?.message || r.status), true);
+    done(); // clean up all listeners
     return;
   }
 
-  // Wait until the browser confirms audio samples are actually playing.
-  await audioStarted;
+  // ── Wait for the first layer to confirm playback ────────────────────────
+  const confirmedPosition = await audioStarted;
 
-  // A newer playClip() call superseded this one while we were waiting.
   if (clipGeneration !== thisGen) return;
 
   setStatus('Playing…');
 
-  // Start bar and pause timer together, exactly when audio is confirmed.
+  // Subtract any audio that already played during the detection window so
+  // the user always hears exactly clipSec seconds from this point forward.
+  const overshoot   = Math.max(0, confirmedPosition - targetStart);
+  const remainingMs = Math.max(100, clipSec * 1000 - overshoot);
+  const fraction    = remainingMs / (clipSec * 1000);
+
   wrap.style.display   = 'block';
   bar.style.transition = 'none';
-  bar.style.width      = '100%';
+  bar.style.width      = `${fraction * 100}%`;
   bar.getBoundingClientRect(); // force reflow so the transition fires correctly
-  bar.style.transition = `width ${clipSec}s linear`;
+  bar.style.transition = `width ${remainingMs / 1000}s linear`;
   bar.style.width      = '0%';
 
   playTimer = setTimeout(() => {
     sdkPlayer.pause();
     setStatus('Clip ended — make your guess!');
-  }, clipSec * 1000);
+  }, remainingMs);
 }
 
 function checkGuess() {

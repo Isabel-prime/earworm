@@ -357,8 +357,6 @@
       overflow: hidden;
       height: 3px;
       margin-top: 12px;
-      /* FIX: always present in the layout — no display:none — so surrounding
-         elements never shift when playback starts or a new song is picked. */
     }
 
     /* ── Scrollbar ── */
@@ -771,7 +769,7 @@ async function fetchUserPlaylists() {
   for (const pl of owned) {
     const opt = document.createElement('option');
     opt.value       = pl.id;
-    opt.textContent = `${pl.name} (${pl.items.total})`;
+    opt.textContent = `${pl.name} (${pl.items.total})`; // FIX: items.total per new API
     select.appendChild(opt);
   }
   select.disabled = false;
@@ -863,8 +861,6 @@ function pickNextSong() {
   document.getElementById('result-banner').className   = 'result-banner mt12';
   document.getElementById('result-banner').textContent = '';
 
-  // FIX: reset bar to full with no animation so it's ready for the next
-  // clip without hiding it (which would cause surrounding elements to shift).
   const bar = document.getElementById('progress-bar');
   bar.style.transition = 'none';
   bar.style.width      = '100%';
@@ -894,8 +890,6 @@ async function playClip() {
 
   const bar = document.getElementById('progress-bar');
 
-  // FIX: snap bar to full immediately on button press (no transition) so the
-  // user sees a filled bar right away, before the ~1 s buffer drain wait.
   bar.style.transition = 'none';
   bar.style.width      = '100%';
 
@@ -905,12 +899,6 @@ async function playClip() {
   const targetTrackId = currentTrack.id;
   const targetStart   = clipStartMs;
 
-  // The Spotify Web Playback SDK drives audio through the Web Audio API —
-  // it does not create an HTMLMediaElement. player_state_changed fires when
-  // the SDK begins filling its audio buffer, which is SDK_BUFFER_MS before
-  // the first sample reaches the speakers. We wait for position to advance
-  // by SDK_BUFFER_MS after the event fires so the animation starts at the
-  // exact moment audio becomes audible.
   const SDK_BUFFER_MS = 1000;
 
   let confirmed = false;
@@ -926,8 +914,6 @@ async function playClip() {
     resolveStart();
   };
 
-  // Layer 1: native <audio> 'playing' event (passive — fires only if the
-  // SDK exposes an HTMLMediaElement, which current versions do not).
   const tryAudio = (el) => {
     if (!el.paused) { done(); return; }
     el.addEventListener('playing', done, { once: true });
@@ -943,7 +929,6 @@ async function playClip() {
   observer.observe(document.documentElement, { childList: true, subtree: true });
   document.querySelectorAll('audio').forEach(tryAudio);
 
-  // Layer 2: player_state_changed → position-advance poll.
   const onSDKState = (state) => {
     if (confirmed) return;
     if (!state || state.paused) return;
@@ -969,8 +954,6 @@ async function playClip() {
 
   const fallbackId = setTimeout(done, 8000);
 
-  // Send the play command. All listeners above are registered synchronously
-  // before this point so no signal can be missed during the network round-trip.
   const r = await spotifyPut('/me/player/play?device_id=' + sdkDeviceId, {
     uris:         ['spotify:track:' + targetTrackId],
     position_ms:  targetStart,
@@ -983,16 +966,13 @@ async function playClip() {
     return;
   }
 
-  // Wait until audio is confirmed audible (buffer drained).
   await audioStarted;
 
   if (clipGeneration !== thisGen) return;
 
   setStatus('Playing…');
 
-  // FIX: bar is already visible and full from the snap above. Now start the
-  // countdown animation from exactly this moment — no show/hide needed.
-  bar.getBoundingClientRect(); // force reflow so transition fires correctly
+  bar.getBoundingClientRect();
   bar.style.transition = `width ${clipSec}s linear`;
   bar.style.width      = '0%';
 
@@ -1004,10 +984,14 @@ async function playClip() {
 
 function checkGuess() {
   if (!currentTrack || revealed) return;
-  const guess = document.getElementById('guess-input').value.trim().toLowerCase();
-  if (!guess) return;
+  const rawGuess = document.getElementById('guess-input').value.trim();
+  if (!rawGuess) return;
 
-  const answer  = currentTrack.name.toLowerCase();
+  // Normalise both strings before comparing so that e.g. "&" vs "and"
+  // and "22" vs "twenty-two" are treated as equivalent.
+  const guess  = normalizeForMatching(rawGuess);
+  const answer = normalizeForMatching(currentTrack.name);
+
   const correct = answer.includes(guess) || guess.includes(answer) ||
     levenshtein(guess, answer) <= Math.floor(answer.length * 0.25);
 
@@ -1072,6 +1056,60 @@ function formatMs(ms) {
   const s = Math.floor(ms / 1000);
   const m = Math.floor(s / 60);
   return `${m}:${String(s % 60).padStart(2, '0')}`;
+}
+
+// Normalise a string for fuzzy answer matching.
+// Applied to both the guess and the song title before any comparison so
+// that surface differences in phrasing don't cause a correct answer to fail.
+function normalizeForMatching(str) {
+  str = str.toLowerCase();
+
+  // Treat & and "and" as interchangeable.
+  str = str.replace(/&/g, 'and');
+
+  // Convert number words to digits (0–99) so that e.g. "twenty-two",
+  // "twenty two", and "22" all reduce to the same string before comparison.
+  // Replacements run in three passes — compound before single-tens before
+  // ones/teens — so that e.g. "twenty" is not consumed before "twenty-two"
+  // has had a chance to match.
+  const onesMap = {
+    'zero':0,'one':1,'two':2,'three':3,'four':4,'five':5,'six':6,
+    'seven':7,'eight':8,'nine':9,'ten':10,'eleven':11,'twelve':12,
+    'thirteen':13,'fourteen':14,'fifteen':15,'sixteen':16,
+    'seventeen':17,'eighteen':18,'nineteen':19,
+  };
+  const tensMap = {
+    'twenty':20,'thirty':30,'forty':40,'fifty':50,
+    'sixty':60,'seventy':70,'eighty':80,'ninety':90,
+  };
+
+  const tensKeys = Object.keys(tensMap).join('|');
+
+  // ones that can follow a tens word to form a compound (1–9 only)
+  const compOnes = Object.keys(onesMap)
+    .filter(k => onesMap[k] >= 1 && onesMap[k] <= 9).join('|');
+
+  const allOnes = Object.keys(onesMap).join('|');
+
+  // Pass 1 — compound: "twenty-two" / "twenty two" → "22"
+  str = str.replace(
+    new RegExp(`\\b(${tensKeys})[-\\s](${compOnes})\\b`, 'g'),
+    (_, t, o) => String(tensMap[t] + onesMap[o])
+  );
+
+  // Pass 2 — single tens: "twenty" → "20"
+  str = str.replace(
+    new RegExp(`\\b(${tensKeys})\\b`, 'g'),
+    (_, t) => String(tensMap[t])
+  );
+
+  // Pass 3 — ones and teens: "one" → "1", "eleven" → "11", etc.
+  str = str.replace(
+    new RegExp(`\\b(${allOnes})\\b`, 'g'),
+    (_, o) => String(onesMap[o])
+  );
+
+  return str;
 }
 
 function levenshtein(a, b) {

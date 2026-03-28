@@ -548,8 +548,8 @@ const SCOPES = [
 // ═══════════════════════════════════════════════════════
 let accessToken   = null;
 let clientId      = null;
-let userProfile   = null;   // logged-in user's profile (id, display_name, etc.)
-let playlist      = [];     // array of {id, name, artist, duration_ms}
+let userProfile   = null;
+let playlist      = [];
 let currentTrack  = null;
 let clipStartMs   = 0;
 let selectedSec   = 10;
@@ -557,11 +557,10 @@ let scoreCorrect  = 0;
 let scoreTotal    = 0;
 let playTimer     = null;
 let revealed      = false;
-let scored        = false;  // FIX (bug 3): track whether this song has been counted yet
-let clipGeneration = 0;     // incremented on each playClip() call; lets stale callbacks
-                             // from a previous call detect they've been superseded
-let sdkPlayer     = null;   // Spotify.Player instance
-let sdkDeviceId   = null;   // this browser tab's device ID
+let scored        = false;
+let clipGeneration = 0;
+let sdkPlayer     = null;
+let sdkDeviceId   = null;
 let sdkReady      = false;
 
 // ═══════════════════════════════════════════════════════
@@ -668,15 +667,13 @@ function disconnect() {
 // ═══════════════════════════════════════════════════════
 //  WEB PLAYBACK SDK
 // ═══════════════════════════════════════════════════════
-
-// Called by the SDK script once it's loaded
 window.onSpotifyWebPlaybackSDKReady = () => {
-  if (!accessToken) return;   // token not ready yet — initSDK() will be called after auth
+  if (!accessToken) return;
   initSDK();
 };
 
 function initSDK() {
-  if (sdkPlayer) return;  // already initialised
+  if (sdkPlayer) return;
 
   sdkPlayer = new Spotify.Player({
     name: 'Earworm',
@@ -719,13 +716,10 @@ function showGameUI() {
 
   setStatus('Initialising playback player…');
 
-  // If SDK script already loaded and fired onSpotifyWebPlaybackSDKReady,
-  // Spotify global will exist — init now. Otherwise the callback will fire.
   if (window.Spotify) {
     initSDK();
   }
 
-  // Populate the playlist dropdown from the user's account
   fetchUserPlaylists();
 }
 
@@ -759,7 +753,6 @@ async function spotifyPut(path, body) {
 async function fetchUserPlaylists() {
   const select = document.getElementById('playlist-select');
 
-  // Fetch the logged-in user's profile so we know their ID
   const profile = await spotifyGet('/me');
   if (!profile) {
     select.innerHTML = '<option value="">— could not load playlists —</option>';
@@ -767,7 +760,6 @@ async function fetchUserPlaylists() {
   }
   userProfile = profile;
 
-  // Page through /me/playlists and keep only ones the user owns
   const owned  = [];
   let offset   = 0;
   const limit  = 50;
@@ -785,7 +777,6 @@ async function fetchUserPlaylists() {
     if (!data.next) break;
   }
 
-  // Rebuild the select options
   select.innerHTML = '<option value="">— select a playlist —</option>';
 
   if (owned.length === 0) {
@@ -803,8 +794,6 @@ async function fetchUserPlaylists() {
   select.disabled = false;
 }
 
-// Called when the user picks an entry from the dropdown.
-// Populates the URL input and immediately kicks off loading.
 function onPlaylistSelect(el) {
   const id = el.value;
   if (!id) return;
@@ -877,14 +866,13 @@ function pickNextSong() {
   const maxStart = Math.max(0, currentTrack.duration_ms - 30000);
   clipStartMs = Math.floor(Math.random() * maxStart);
 
-  // Reset duration to 1s
   selectedSec = 1;
   document.querySelectorAll('.dur-btn').forEach(b => {
     b.classList.toggle('active', b.dataset.sec === '1');
   });
 
   revealed = false;
-  scored   = false;  // FIX (bug 3): reset per-song scored flag
+  scored   = false;
   document.getElementById('track-name').textContent    = '?';
   document.getElementById('track-artist').textContent  = '';
   document.getElementById('track-hint').textContent    =
@@ -914,18 +902,54 @@ async function playClip() {
   }
   clearTimeout(playTimer);
 
-  // Stamp this invocation so that any listeners registered by a previous
-  // call can detect they've been superseded and should do nothing.
   clipGeneration++;
   const thisGen = clipGeneration;
 
   const wrap = document.getElementById('progress-wrap');
   const bar  = document.getElementById('progress-bar');
 
-  // Keep the bar hidden until the browser confirms audio is actually playing.
   wrap.style.display = 'none';
   setStatus('Starting playback…');
 
+  const clipSec = selectedSec;
+
+  // ── The critical ordering fix ────────────────────────────────────────────
+  //
+  // fetch() dispatches the HTTP request synchronously at the point it is
+  // called; the 'await' below only suspends execution while waiting for the
+  // RESPONSE to come back over the network.  The Spotify SDK maintains its
+  // own persistent WebSocket connection to Spotify's servers and can receive
+  // the "start playing" instruction — and fire the 'playing' event on its
+  // <audio> element — during that suspension window, before our listener
+  // would be attached if we set it up afterwards.
+  //
+  // Solution: build the audioStarted promise and attach the 'playing'
+  // listener synchronously HERE, before spotifyPut() is ever called.
+  // JavaScript is single-threaded, so nothing else can run between this
+  // line and the spotifyPut() call below — the listener is guaranteed to
+  // be in place before the SDK can act on the command.
+  // ────────────────────────────────────────────────────────────────────────
+  const audioEl = document.querySelector('audio');
+
+  const audioStarted = new Promise(resolve => {
+    let fallbackId;
+    // 'done' is used as both the 'playing' callback and the fallback — it is
+    // safe to call multiple times since resolving an already-resolved Promise
+    // is a no-op, and clearTimeout on an already-fired timer is also a no-op.
+    const done = () => { clearTimeout(fallbackId); resolve(); };
+
+    // 5-second safety net for the rare case where 'playing' never fires
+    // (e.g. extreme network latency, or the SDK silently failing to start).
+    fallbackId = setTimeout(done, 5000);
+
+    if (audioEl) {
+      audioEl.addEventListener('playing', done, { once: true });
+    }
+    // If audioEl is null (should not happen once sdkReady is true) we
+    // rely solely on the fallback timeout.
+  });
+
+  // Send the play command. The listener above is already in place.
   const r = await spotifyPut('/me/player/play?device_id=' + sdkDeviceId, {
     uris:         ['spotify:track:' + currentTrack.id],
     position_ms:  clipStartMs,
@@ -937,48 +961,15 @@ async function playClip() {
     return;
   }
 
-  const clipSec = selectedSec;
+  // Wait until the browser confirms audio samples are actually playing.
+  await audioStarted;
 
-  // Wait for the browser's native 'playing' event on the <audio> element
-  // that the Spotify SDK injects into the page. Unlike SDK-level events,
-  // the browser only fires 'playing' once audio samples are genuinely being
-  // sent to the output device — i.e. after buffering is complete.
-  await new Promise(resolve => {
-    const fallback = setTimeout(resolve, 8000);
-
-    const onPlaying = () => {
-      clearTimeout(fallback);
-      resolve();
-    };
-
-    // Attach the one-shot listener. If the SDK hasn't created the <audio>
-    // element yet (unlikely once sdkReady is true, but defensive), poll
-    // briefly until it appears.
-    const attach = (audioEl) => {
-      audioEl.addEventListener('playing', onPlaying, { once: true });
-    };
-
-    const existing = document.querySelector('audio');
-    if (existing) {
-      attach(existing);
-    } else {
-      const pollId = setInterval(() => {
-        const found = document.querySelector('audio');
-        if (found) { clearInterval(pollId); attach(found); }
-      }, 30);
-      // Ensure the interval is cleaned up if the fallback fires first.
-      setTimeout(() => clearInterval(pollId), 8000);
-    }
-  });
-
-  // If the user hit play again while we were waiting, abort — the newer
-  // call's listener is now in charge of the bar and timer.
+  // A newer playClip() call superseded this one while we were waiting.
   if (clipGeneration !== thisGen) return;
 
   setStatus('Playing…');
 
-  // Audio is now confirmed playing. Start the bar and the pause timer
-  // simultaneously so they stay in sync for exactly clipSec seconds.
+  // Start bar and pause timer together, exactly when audio is confirmed.
   wrap.style.display   = 'block';
   bar.style.transition = 'none';
   bar.style.width      = '100%';
@@ -1001,8 +992,6 @@ function checkGuess() {
   const correct = answer.includes(guess) || guess.includes(answer) ||
     levenshtein(guess, answer) <= Math.floor(answer.length * 0.25);
 
-  // FIX (bug 3): only increment score once per song, and don't touch
-  // scoreTotal at all on a wrong guess
   const banner = document.getElementById('result-banner');
   if (correct) {
     if (!scored) {
@@ -1021,8 +1010,8 @@ function checkGuess() {
 }
 
 function revealAnswer() {
-  if (!currentTrack || revealed) return;  // FIX (bug 4): guard against reveal after correct guess
-  if (!scored) {                          // FIX (bug 3): only count once per song
+  if (!currentTrack || revealed) return;
+  if (!scored) {
     scoreTotal++;
     scored = true;
     updateScore();
@@ -1090,8 +1079,6 @@ window.addEventListener('DOMContentLoaded', () => {
   const savedId = localStorage.getItem('ew_client_id');
   if (savedId) document.getElementById('client-id-input').value = savedId;
 
-  // FIX (bug 2): register keyboard shortcuts before early returns so they
-  // are always active regardless of which auth path was taken
   document.addEventListener('keydown', e => {
     const guessFocused = document.activeElement === document.getElementById('guess-input');
     if (guessFocused) return;

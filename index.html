@@ -12,8 +12,8 @@
       --surface:   #161616;
       --surface2:  #1f1f1f;
       --border:    #2a2a2a;
-      --amber:     #f5a623;
-      --amber-dim: #a06a10;
+      --amber:     #a855f7;
+      --amber-dim: #6b21a8;
       --green:     #1db954;
       --red:       #e05252;
       --text:      #e8e0d0;
@@ -33,7 +33,7 @@
       align-items: center;
       padding: 0 16px 60px;
       background-image:
-        radial-gradient(ellipse 80% 50% at 50% -10%, rgba(245,166,35,0.08) 0%, transparent 60%);
+        radial-gradient(ellipse 80% 50% at 50% -10%, rgba(168,85,247,0.08) 0%, transparent 60%);
     }
 
     header {
@@ -108,7 +108,7 @@
     .btn:active { transform: scale(0.97); }
     .btn:disabled { opacity: 0.35; cursor: not-allowed; transform: none; }
 
-    .btn-primary   { background: var(--amber); color: #000; }
+    .btn-primary   { background: var(--amber); color: #fff; }
     .btn-secondary { background: var(--surface2); color: var(--text); border: 1px solid var(--border); }
     .btn-green     { background: var(--green); color: #000; }
     .btn-ghost     { background: transparent; color: var(--muted); border: 1px solid var(--border); }
@@ -156,7 +156,7 @@
     }
     .dur-btn:hover { border-color: var(--amber); color: var(--amber); }
     .dur-btn.active {
-      background: rgba(245,166,35,0.12);
+      background: rgba(168,85,247,0.12);
       border-color: var(--amber);
       color: var(--amber);
     }
@@ -175,7 +175,7 @@
     .play-ring:disabled { opacity: 0.3; cursor: not-allowed; }
     .play-ring:not(:disabled):hover { opacity: 0.88; }
     .play-ring:not(:disabled):active { transform: scale(0.95); }
-    .play-ring svg { margin-left: 4px; }
+    .play-ring svg { margin-left: 4px; fill: #fff; }
 
     .play-row {
       display: flex;
@@ -239,8 +239,8 @@
     }
     .result-banner.reveal {
       display: flex;
-      background: rgba(245,166,35,0.08);
-      border: 1px solid rgba(245,166,35,0.25);
+      background: rgba(168,85,247,0.08);
+      border: 1px solid rgba(168,85,247,0.25);
       color: var(--amber);
     }
 
@@ -347,9 +347,9 @@
     <div class="card">
       <div class="card-label">Connect Spotify</div>
       <p class="auth-info">
-        Earworm controls Spotify playback on your phone. You'll need to be
-        playing something on your phone first so Spotify registers it as the
-        active device.<br><br>
+        Earworm plays music clips directly in this browser tab using the
+        Spotify Web Playback SDK. No phone or external device needed —
+        audio comes straight from this page.<br><br>
         Enter your Spotify app's <strong>Client ID</strong> below, then hit
         <em>Connect</em>. Your Client ID is never sent anywhere except directly
         to Spotify.
@@ -382,7 +382,7 @@
         3. In the app settings, add this page's URL as a <strong>Redirect URI</strong>:<br>
         &nbsp;&nbsp;&nbsp;<code id="redirect-display" style="color:var(--amber);font-size:11px;"></code><br>
         4. Copy your <strong>Client ID</strong> and paste it above<br>
-        5. Make sure Spotify is open and playing on your phone
+        5. Make sure your browser volume is on — audio plays directly here!
       </p>
     </div>
   </div>
@@ -432,7 +432,7 @@
     <!-- Play row -->
     <div class="play-row mt16">
       <button class="play-ring" id="play-btn" onclick="playClip()" disabled title="Play clip">
-        <svg width="28" height="28" viewBox="0 0 24 24" fill="#000">
+        <svg width="28" height="28" viewBox="0 0 24 24" fill="#fff">
           <path d="M8 5v14l11-7z"/>
         </svg>
       </button>
@@ -483,6 +483,9 @@ const SCOPES = [
   'user-modify-playback-state',
   'playlist-read-private',
   'playlist-read-collaborative',
+  'streaming',
+  'user-read-email',
+  'user-read-private',
 ].join(' ');
 
 // ═══════════════════════════════════════════════════════
@@ -498,6 +501,9 @@ let scoreCorrect = 0;
 let scoreTotal   = 0;
 let playTimer    = null;
 let revealed     = false;
+let sdkPlayer    = null;   // Spotify.Player instance
+let sdkDeviceId  = null;   // this browser tab's device ID
+let sdkReady     = false;
 
 // ═══════════════════════════════════════════════════════
 //  PKCE HELPERS
@@ -573,12 +579,10 @@ async function handleCallback(code) {
   }
 
   accessToken = data.access_token;
-  // Store token with expiry
   localStorage.setItem('ew_token', accessToken);
   localStorage.setItem('ew_token_exp', Date.now() + (data.expires_in - 60) * 1000);
   sessionStorage.removeItem('pkce_verifier');
 
-  // Clean URL
   history.replaceState({}, '', window.location.pathname);
   showGameUI();
 }
@@ -594,6 +598,7 @@ function loadStoredToken() {
 }
 
 function disconnect() {
+  if (sdkPlayer) sdkPlayer.disconnect();
   localStorage.removeItem('ew_token');
   localStorage.removeItem('ew_token_exp');
   accessToken = null;
@@ -602,17 +607,64 @@ function disconnect() {
 }
 
 // ═══════════════════════════════════════════════════════
+//  WEB PLAYBACK SDK
+// ═══════════════════════════════════════════════════════
+
+// Called by the SDK script once it's loaded
+window.onSpotifyWebPlaybackSDKReady = () => {
+  if (!accessToken) return;   // token not ready yet — initSDK() will be called after auth
+  initSDK();
+};
+
+function initSDK() {
+  if (sdkPlayer) return;  // already initialised
+
+  sdkPlayer = new Spotify.Player({
+    name: 'Earworm',
+    getOAuthToken: cb => cb(accessToken),
+    volume: 0.8,
+  });
+
+  sdkPlayer.addListener('ready', ({ device_id }) => {
+    sdkDeviceId = device_id;
+    sdkReady    = true;
+    setStatus('Player ready — load a playlist to begin!');
+    document.getElementById('play-btn').disabled = (playlist.length === 0);
+  });
+
+  sdkPlayer.addListener('not_ready', () => {
+    sdkReady = false;
+    setStatus('Player went offline.', true);
+  });
+
+  sdkPlayer.addListener('initialization_error', ({ message }) =>
+    setStatus('SDK init error: ' + message, true));
+
+  sdkPlayer.addListener('authentication_error', ({ message }) =>
+    setStatus('SDK auth error: ' + message, true));
+
+  sdkPlayer.addListener('account_error', () =>
+    setStatus('Spotify Premium is required for in-browser playback.', true));
+
+  sdkPlayer.connect();
+}
+
+// ═══════════════════════════════════════════════════════
 //  UI SWITCHING
 // ═══════════════════════════════════════════════════════
 function showGameUI() {
-  document.getElementById('auth-screen').style.display  = 'none';
-  document.getElementById('setup-card').style.display   = 'block';
-  document.getElementById('score-bar').style.display    = 'block';
+  document.getElementById('auth-screen').style.display    = 'none';
+  document.getElementById('setup-card').style.display     = 'block';
+  document.getElementById('score-bar').style.display      = 'block';
   document.getElementById('disconnect-row').style.display = 'block';
-  // Restore saved client id in input just in case
-  const saved = localStorage.getItem('ew_client_id');
-  if (saved) document.getElementById('client-id-input').value = saved;
-  setStatus('Connected! Paste a playlist URL and hit Load.');
+
+  setStatus('Initialising playback player…');
+
+  // If SDK script already loaded and fired onSpotifyWebPlaybackSDKReady,
+  // Spotify global will exist — init now. Otherwise the callback will fire.
+  if (window.Spotify) {
+    initSDK();
+  }
 }
 
 // ═══════════════════════════════════════════════════════
@@ -630,18 +682,6 @@ async function spotifyGet(path) {
 async function spotifyPut(path, body) {
   const res = await fetch('https://api.spotify.com/v1' + path, {
     method:  'PUT',
-    headers: {
-      Authorization:  'Bearer ' + accessToken,
-      'Content-Type': 'application/json',
-    },
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  return res;
-}
-
-async function spotifyPost(path, body) {
-  const res = await fetch('https://api.spotify.com/v1' + path, {
-    method:  'POST',
     headers: {
       Authorization:  'Bearer ' + accessToken,
       'Content-Type': 'application/json',
@@ -672,7 +712,6 @@ async function loadPlaylist() {
   let url  = `/playlists/${pid}/tracks?limit=100&fields=next,items(track(id,name,artists,duration_ms,is_local))`;
 
   while (url) {
-    // url might be a full URL from 'next' or just the path
     const data = url.startsWith('http')
       ? await fetch(url, { headers: { Authorization: 'Bearer ' + accessToken } }).then(r => r.json())
       : await spotifyGet(url);
@@ -710,20 +749,17 @@ function pickNextSong() {
 
   currentTrack = playlist[Math.floor(Math.random() * playlist.length)];
 
-  // Pick a random start point, avoiding the last 30 s of the song
-  // and leaving enough room for the clip.
   const maxStart = Math.max(0, currentTrack.duration_ms - 30000);
   clipStartMs = Math.floor(Math.random() * maxStart);
 
-  // Reset UI
   revealed = false;
-  document.getElementById('track-name').textContent   = '?';
-  document.getElementById('track-artist').textContent = '';
-  document.getElementById('track-hint').textContent   =
+  document.getElementById('track-name').textContent    = '?';
+  document.getElementById('track-artist').textContent  = '';
+  document.getElementById('track-hint').textContent    =
     `${playlist.length} tracks · ${selectedSec}s clip`;
-  document.getElementById('play-btn').disabled  = false;
-  document.getElementById('guess-input').value  = '';
-  document.getElementById('result-banner').className = 'result-banner mt12';
+  document.getElementById('play-btn').disabled         = !sdkReady;
+  document.getElementById('guess-input').value         = '';
+  document.getElementById('result-banner').className   = 'result-banner mt12';
   document.getElementById('result-banner').textContent = '';
   document.getElementById('progress-wrap').style.display = 'none';
   clearTimeout(playTimer);
@@ -740,52 +776,41 @@ function selectDuration(el) {
 }
 
 async function playClip() {
-  if (!currentTrack) return;
-  clearTimeout(playTimer);
-
-  // 1. Find the active device (user's phone)
-  const devices = await spotifyGet('/me/player/devices');
-  if (!devices || devices.devices.length === 0) {
-    setStatus('No active Spotify device found. Open Spotify on your phone and play something first.', true);
+  if (!currentTrack || !sdkReady || !sdkDeviceId) {
+    setStatus('Player not ready yet — please wait a moment.', true);
     return;
   }
+  clearTimeout(playTimer);
 
-  // Prefer a phone/smartphone, otherwise take the first available
-  const phone = devices.devices.find(d => d.type === 'Smartphone') || devices.devices[0];
-
-  // 2. Start playback at the clip position
   setStatus('Starting playback…');
-  const r = await spotifyPut('/me/player/play?device_id=' + phone.id, {
-    uris:      ['spotify:track:' + currentTrack.id],
-    position_ms: clipStartMs,
+
+  // Tell Spotify to play this track at clipStartMs on our SDK device
+  const r = await spotifyPut('/me/player/play?device_id=' + sdkDeviceId, {
+    uris:         ['spotify:track:' + currentTrack.id],
+    position_ms:  clipStartMs,
   });
 
-  if (!r.ok && r.status !== 204) {
+  if (r && !r.ok && r.status !== 204) {
     const err = await r.json().catch(() => ({}));
-    if (r.status === 403) {
-      setStatus('Playback error: Spotify Premium required for playback control.', true);
-    } else {
-      setStatus('Playback error: ' + (err.error?.message || r.status), true);
-    }
+    setStatus('Playback error: ' + (err.error?.message || r.status), true);
     return;
   }
 
   setStatus('Playing…');
 
-  // 3. Show progress bar
+  // Animate progress bar
   const wrap = document.getElementById('progress-wrap');
   const bar  = document.getElementById('progress-bar');
-  wrap.style.display = 'block';
+  wrap.style.display   = 'block';
   bar.style.transition = 'none';
-  bar.style.width = '100%';
-  // Force reflow
-  bar.getBoundingClientRect();
+  bar.style.width      = '100%';
+  bar.getBoundingClientRect(); // force reflow
   bar.style.transition = `width ${selectedSec}s linear`;
-  bar.style.width = '0%';
+  bar.style.width      = '0%';
 
-  // 4. Pause after clip duration
-  playTimer = setTimeout(async () => {
-    await spotifyPut('/me/player/pause?device_id=' + phone.id);
+  // Pause via SDK after clip duration (more reliable than API round-trip)
+  playTimer = setTimeout(() => {
+    sdkPlayer.pause();
     setStatus('Clip ended — make your guess!');
   }, selectedSec * 1000);
 }
@@ -796,7 +821,6 @@ function checkGuess() {
   if (!guess) return;
 
   const answer = currentTrack.name.toLowerCase();
-  // Flexible match: guess is contained in answer or answer contains guess
   const correct = answer.includes(guess) || guess.includes(answer) ||
     levenshtein(guess, answer) <= Math.floor(answer.length * 0.25);
 
@@ -832,11 +856,12 @@ function revealSong() {
   revealed = true;
   document.getElementById('track-name').textContent   = currentTrack.name;
   document.getElementById('track-artist').textContent = currentTrack.artist;
-  document.getElementById('track-hint').textContent   =
-    `starts at ${formatMs(clipStartMs)}`;
+  document.getElementById('track-hint').textContent   = `starts at ${formatMs(clipStartMs)}`;
 }
 
 function nextSong() {
+  if (sdkPlayer) sdkPlayer.pause();
+  clearTimeout(playTimer);
   pickNextSong();
 }
 
@@ -860,7 +885,6 @@ function formatMs(ms) {
   return `${m}:${String(s % 60).padStart(2, '0')}`;
 }
 
-// Simple Levenshtein for fuzzy matching
 function levenshtein(a, b) {
   const m = a.length, n = b.length;
   const dp = Array.from({length: m+1}, (_, i) =>
@@ -880,7 +904,6 @@ function levenshtein(a, b) {
 window.addEventListener('DOMContentLoaded', () => {
   showRedirectURI();
 
-  // Pre-fill client ID if saved
   const savedId = localStorage.getItem('ew_client_id');
   if (savedId) document.getElementById('client-id-input').value = savedId;
 
@@ -902,9 +925,9 @@ window.addEventListener('DOMContentLoaded', () => {
     showGameUI();
     return;
   }
-
-  // Show auth screen by default (already visible)
 });
 </script>
+
+<script src="https://sdk.scdn.co/spotify-player.js"></script>
 </body>
 </html>

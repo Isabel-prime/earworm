@@ -755,6 +755,12 @@ function pickNextSong() {
   const maxStart = Math.max(0, currentTrack.duration_ms - 30000);
   clipStartMs = Math.floor(Math.random() * maxStart);
 
+  // Reset duration to 1s
+  selectedSec = 1;
+  document.querySelectorAll('.dur-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.sec === '1');
+  });
+
   revealed = false;
   document.getElementById('track-name').textContent    = '?';
   document.getElementById('track-artist').textContent  = '';
@@ -784,6 +790,12 @@ async function playClip() {
     return;
   }
   clearTimeout(playTimer);
+  // Reset bar immediately so it doesn't show stale state
+  const wrap = document.getElementById('progress-wrap');
+  const bar  = document.getElementById('progress-bar');
+  wrap.style.display   = 'block';
+  bar.style.transition = 'none';
+  bar.style.width      = '100%';
 
   setStatus('Starting playback…');
 
@@ -796,26 +808,38 @@ async function playClip() {
   if (r && !r.ok && r.status !== 204) {
     const err = await r.json().catch(() => ({}));
     setStatus('Playback error: ' + (err.error?.message || r.status), true);
+    wrap.style.display = 'none';
     return;
   }
 
+  // Wait for the SDK to confirm playback has actually started before
+  // starting the progress bar and the pause timer.
+  const clipSec = selectedSec;
+  const waitForPlay = new Promise(resolve => {
+    const onStateChange = state => {
+      if (state && !state.paused) {
+        sdkPlayer.removeListener('player_state_changed', onStateChange);
+        resolve();
+      }
+    };
+    sdkPlayer.addListener('player_state_changed', onStateChange);
+    // Safety fallback: start anyway after 3s if event never fires
+    setTimeout(resolve, 3000);
+  });
+
+  await waitForPlay;
   setStatus('Playing…');
 
-  // Animate progress bar
-  const wrap = document.getElementById('progress-wrap');
-  const bar  = document.getElementById('progress-bar');
-  wrap.style.display   = 'block';
-  bar.style.transition = 'none';
-  bar.style.width      = '100%';
+  // Now start the bar animation
   bar.getBoundingClientRect(); // force reflow
-  bar.style.transition = `width ${selectedSec}s linear`;
+  bar.style.transition = `width ${clipSec}s linear`;
   bar.style.width      = '0%';
 
-  // Pause via SDK after clip duration (more reliable than API round-trip)
+  // Pause via SDK after clip duration
   playTimer = setTimeout(() => {
     sdkPlayer.pause();
     setStatus('Clip ended — make your guess!');
-  }, selectedSec * 1000);
+  }, clipSec * 1000);
 }
 
 function checkGuess() {
@@ -928,6 +952,28 @@ window.addEventListener('DOMContentLoaded', () => {
     showGameUI();
     return;
   }
+
+  // Keyboard shortcuts (ignored when typing in the guess input)
+  document.addEventListener('keydown', e => {
+    const guessFocused = document.activeElement === document.getElementById('guess-input');
+    if (guessFocused) return;
+    if (!currentTrack) return;
+
+    if (e.key === 'ArrowRight') {
+      nextSong();
+    } else if (e.key === 'r' || e.key === 'R') {
+      revealAnswer();
+    } else if (e.key === ' ') {
+      e.preventDefault();
+      playClip();
+    } else {
+      const durMap = { '1': '1', '2': '2', '3': '3', '5': '5', '0': '10' };
+      if (durMap[e.key]) {
+        const btn = document.querySelector(`.dur-btn[data-sec="${durMap[e.key]}"]`);
+        if (btn) selectDuration(btn);
+      }
+    }
+  });
 });
 </script>
 

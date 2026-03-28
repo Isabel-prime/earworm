@@ -720,7 +720,7 @@ async function loadPlaylist() {
     if (!data) { setStatus('Could not load playlist. Check the URL.', true); return; }
 
     for (const item of data.items || []) {
-      const t = item.track;
+      const t = item.item;
       if (!t || t.is_local || !t.id) continue;
       playlist.push({
         id:          t.id,

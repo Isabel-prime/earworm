@@ -546,21 +546,23 @@ const SCOPES = [
 // ═══════════════════════════════════════════════════════
 //  STATE
 // ═══════════════════════════════════════════════════════
-let accessToken  = null;
-let clientId     = null;
-let userProfile  = null;   // logged-in user's profile (id, display_name, etc.)
-let playlist     = [];   // array of {id, name, artist, duration_ms}
-let currentTrack = null;
-let clipStartMs  = 0;
-let selectedSec  = 10;
-let scoreCorrect = 0;
-let scoreTotal   = 0;
-let playTimer    = null;
-let revealed     = false;
-let scored       = false;  // FIX (bug 3): track whether this song has been counted yet
-let sdkPlayer    = null;   // Spotify.Player instance
-let sdkDeviceId  = null;   // this browser tab's device ID
-let sdkReady     = false;
+let accessToken   = null;
+let clientId      = null;
+let userProfile   = null;   // logged-in user's profile (id, display_name, etc.)
+let playlist      = [];     // array of {id, name, artist, duration_ms}
+let currentTrack  = null;
+let clipStartMs   = 0;
+let selectedSec   = 10;
+let scoreCorrect  = 0;
+let scoreTotal    = 0;
+let playTimer     = null;
+let revealed      = false;
+let scored        = false;  // FIX (bug 3): track whether this song has been counted yet
+let clipGeneration = 0;     // incremented on each playClip() call; lets stale callbacks
+                             // from a previous call detect they've been superseded
+let sdkPlayer     = null;   // Spotify.Player instance
+let sdkDeviceId   = null;   // this browser tab's device ID
+let sdkReady      = false;
 
 // ═══════════════════════════════════════════════════════
 //  PKCE HELPERS
@@ -911,16 +913,19 @@ async function playClip() {
     return;
   }
   clearTimeout(playTimer);
-  // Reset bar immediately so it doesn't show stale state
+
+  // Stamp this invocation so that any listeners registered by a previous
+  // call can detect they've been superseded and should do nothing.
+  clipGeneration++;
+  const thisGen = clipGeneration;
+
   const wrap = document.getElementById('progress-wrap');
   const bar  = document.getElementById('progress-bar');
-  wrap.style.display   = 'block';
-  bar.style.transition = 'none';
-  bar.style.width      = '100%';
 
+  // Keep the bar hidden until the browser confirms audio is actually playing.
+  wrap.style.display = 'none';
   setStatus('Starting playback…');
 
-  // Tell Spotify to play this track at clipStartMs on our SDK device
   const r = await spotifyPut('/me/player/play?device_id=' + sdkDeviceId, {
     uris:         ['spotify:track:' + currentTrack.id],
     position_ms:  clipStartMs,
@@ -929,34 +934,58 @@ async function playClip() {
   if (r && !r.ok && r.status !== 204) {
     const err = await r.json().catch(() => ({}));
     setStatus('Playback error: ' + (err.error?.message || r.status), true);
-    wrap.style.display = 'none';
     return;
   }
 
-  // Wait for the SDK to confirm playback has actually started before
-  // starting the progress bar and the pause timer.
   const clipSec = selectedSec;
-  const waitForPlay = new Promise(resolve => {
-    const onStateChange = state => {
-      if (state && !state.paused) {
-        sdkPlayer.removeListener('player_state_changed', onStateChange);
-        resolve();
-      }
+
+  // Wait for the browser's native 'playing' event on the <audio> element
+  // that the Spotify SDK injects into the page. Unlike SDK-level events,
+  // the browser only fires 'playing' once audio samples are genuinely being
+  // sent to the output device — i.e. after buffering is complete.
+  await new Promise(resolve => {
+    const fallback = setTimeout(resolve, 8000);
+
+    const onPlaying = () => {
+      clearTimeout(fallback);
+      resolve();
     };
-    sdkPlayer.addListener('player_state_changed', onStateChange);
-    // Safety fallback: start anyway after 3s if event never fires
-    setTimeout(resolve, 3000);
+
+    // Attach the one-shot listener. If the SDK hasn't created the <audio>
+    // element yet (unlikely once sdkReady is true, but defensive), poll
+    // briefly until it appears.
+    const attach = (audioEl) => {
+      audioEl.addEventListener('playing', onPlaying, { once: true });
+    };
+
+    const existing = document.querySelector('audio');
+    if (existing) {
+      attach(existing);
+    } else {
+      const pollId = setInterval(() => {
+        const found = document.querySelector('audio');
+        if (found) { clearInterval(pollId); attach(found); }
+      }, 30);
+      // Ensure the interval is cleaned up if the fallback fires first.
+      setTimeout(() => clearInterval(pollId), 8000);
+    }
   });
 
-  await waitForPlay;
+  // If the user hit play again while we were waiting, abort — the newer
+  // call's listener is now in charge of the bar and timer.
+  if (clipGeneration !== thisGen) return;
+
   setStatus('Playing…');
 
-  // Now start the bar animation
-  bar.getBoundingClientRect(); // force reflow
+  // Audio is now confirmed playing. Start the bar and the pause timer
+  // simultaneously so they stay in sync for exactly clipSec seconds.
+  wrap.style.display   = 'block';
+  bar.style.transition = 'none';
+  bar.style.width      = '100%';
+  bar.getBoundingClientRect(); // force reflow so the transition fires correctly
   bar.style.transition = `width ${clipSec}s linear`;
   bar.style.width      = '0%';
 
-  // Pause via SDK after clip duration
   playTimer = setTimeout(() => {
     sdkPlayer.pause();
     setStatus('Clip ended — make your guess!');

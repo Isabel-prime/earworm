@@ -264,8 +264,6 @@
       flex: 1;
       min-width: 0;
     }
-    /* When the dropdown is open, square off the input's bottom corners so
-       it visually connects with the dropdown panel below it. */
     .autocomplete-wrap.open input[type="text"] {
       border-bottom-left-radius: 0;
       border-bottom-right-radius: 0;
@@ -384,6 +382,7 @@
       color: var(--amber);
       line-height: 1;
     }
+    .score-item .score-num.incorrect { color: var(--red); }
     .score-item .score-lbl {
       font-family: 'IBM Plex Mono', monospace;
       font-size: 10px;
@@ -492,36 +491,17 @@
         <span class="score-lbl">Correct</span>
       </div>
       <div class="score-item">
+        <span class="score-num incorrect" id="score-incorrect">0</span>
+        <span class="score-lbl">Incorrect</span>
+      </div>
+      <div class="score-item">
         <span class="score-num" id="score-total">0</span>
         <span class="score-lbl">Played</span>
       </div>
     </div>
   </div>
 
-  <!-- ══ SETUP CARD ══ -->
-  <div class="card" id="setup-card">
-    <div class="card-label">Playlist</div>
-
-    <select id="playlist-select" onchange="onPlaylistSelect(this)" disabled>
-      <option value="">— loading your playlists… —</option>
-    </select>
-
-    <div class="or-divider mt12">or enter url manually</div>
-
-    <div class="mt12">
-      <input type="text" id="playlist-input"
-        placeholder="Spotify playlist URL or ID…"
-        autocomplete="off" spellcheck="false" />
-    </div>
-    <div class="mt8">
-      <small>e.g. https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M</small>
-    </div>
-    <div class="mt12">
-      <button class="btn btn-primary btn-full" onclick="loadPlaylist()">Load Playlist</button>
-    </div>
-  </div>
-
-  <!-- ══ GAME CARD ══ -->
+  <!-- ══ GAME CARD ══ (moved above setup card) -->
   <div class="card" id="game-card">
 
     <div class="card-label">Clip Length</div>
@@ -551,8 +531,6 @@
     <div class="divider mt16"></div>
 
     <div class="card-label mt12">Your Guess</div>
-
-    <!-- autocomplete-wrap makes the input the anchor for the dropdown -->
     <div class="guess-row">
       <div class="autocomplete-wrap" id="autocomplete-wrap">
         <input type="text" id="guess-input" placeholder="Song name…"
@@ -573,6 +551,30 @@
 
   </div>
 
+  <!-- ══ SETUP CARD ══ (moved below game card) -->
+  <div class="card" id="setup-card">
+    <div class="card-label">Playlist</div>
+
+    <select id="playlist-select" onchange="onPlaylistSelect(this)" disabled>
+      <option value="">— loading your playlists… —</option>
+    </select>
+
+    <div class="or-divider mt12">or enter url manually</div>
+
+    <div class="mt12">
+      <input type="text" id="playlist-input"
+        placeholder="Spotify playlist URL or ID…"
+        autocomplete="off" spellcheck="false" />
+    </div>
+    <div class="mt8">
+      <small>e.g. https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M</small>
+    </div>
+    <div class="mt12">
+      <button class="btn btn-primary btn-full" onclick="loadPlaylist()">Load Playlist</button>
+    </div>
+  </div>
+
+  <!-- Disconnect -->
   <div id="disconnect-row" style="display:none; text-align:center;">
     <button class="btn btn-ghost" onclick="disconnect()">↩ Disconnect</button>
   </div>
@@ -593,23 +595,24 @@ const SCOPES = [
 // ═══════════════════════════════════════════════════════
 //  STATE
 // ═══════════════════════════════════════════════════════
-let accessToken      = null;
-let clientId         = null;
-let userProfile      = null;
-let playlist         = [];
-let currentTrack     = null;
-let clipStartMs      = 0;
-let selectedSec      = 10;
-let scoreCorrect     = 0;
-let scoreTotal       = 0;
-let playTimer        = null;
-let revealed         = false;
-let scored           = false;
-let clipGeneration   = 0;
-let autocompleteIndex = -1;   // index of the highlighted autocomplete item (-1 = none)
-let sdkPlayer        = null;
-let sdkDeviceId      = null;
-let sdkReady         = false;
+let accessToken       = null;
+let clientId          = null;
+let userProfile       = null;
+let playlist          = [];
+let currentTrack      = null;
+let clipStartMs       = 0;
+let selectedSec       = 10;
+let scoreCorrect      = 0;
+let scoreIncorrect    = 0;
+let scoreTotal        = 0;
+let playTimer         = null;
+let revealed          = false;
+let scored            = false;
+let clipGeneration    = 0;
+let autocompleteIndex = -1;
+let sdkPlayer         = null;
+let sdkDeviceId       = null;
+let sdkReady          = false;
 
 // ═══════════════════════════════════════════════════════
 //  PKCE HELPERS
@@ -913,7 +916,6 @@ function pickNextSong() {
   document.getElementById('result-banner').className   = 'result-banner mt12';
   document.getElementById('result-banner').textContent = '';
 
-  // Always reset autocomplete when a new song is picked
   hideAutocomplete();
 
   const bar = document.getElementById('progress-bar');
@@ -944,7 +946,6 @@ async function playClip() {
   const thisGen = clipGeneration;
 
   const bar = document.getElementById('progress-bar');
-
   bar.style.transition = 'none';
   bar.style.width      = '100%';
 
@@ -1022,7 +1023,6 @@ async function playClip() {
   }
 
   await audioStarted;
-
   if (clipGeneration !== thisGen) return;
 
   setStatus('Playing…');
@@ -1060,12 +1060,12 @@ function checkGuess() {
     banner.innerHTML = `✓ Correct! "${currentTrack.name}" by ${currentTrack.artist}`;
     revealSong();
   } else {
+    scoreIncorrect++;
+    updateScore();
     banner.className = 'result-banner mt12 wrong';
     banner.innerHTML = `✗ Not quite. Try again or reveal the answer.`;
   }
 
-  // Dismiss the autocomplete and return keyboard focus to the page so
-  // that Space / R / ArrowRight shortcuts work immediately after guessing.
   hideAutocomplete();
   document.getElementById('guess-input').blur();
 }
@@ -1098,23 +1098,19 @@ function nextSong() {
 }
 
 function updateScore() {
-  document.getElementById('score-correct').textContent = scoreCorrect;
-  document.getElementById('score-total').textContent   = scoreTotal;
+  document.getElementById('score-correct').textContent   = scoreCorrect;
+  document.getElementById('score-incorrect').textContent = scoreIncorrect;
+  document.getElementById('score-total').textContent     = scoreTotal;
 }
 
 // ═══════════════════════════════════════════════════════
 //  AUTOCOMPLETE
 // ═══════════════════════════════════════════════════════
-
-// Return up to 6 tracks from the playlist whose normalised names best match
-// the query. Ranked: exact > starts-with > contains > word-starts-with.
-// Duplicates (same normalised name) are collapsed to one entry.
 function getSearchResults(query) {
   if (!query || !playlist.length) return [];
   const normQuery = normalizeForMatching(query);
   if (!normQuery) return [];
 
-  // Deduplicate by normalised title so repeated tracks don't flood the list
   const seen   = new Set();
   const unique = [];
   for (const track of playlist) {
@@ -1126,11 +1122,11 @@ function getSearchResults(query) {
   for (const track of unique) {
     const normName = normalizeForMatching(track.name);
     let score;
-    if (normName === normQuery)              score = 0; // exact
-    else if (normName.startsWith(normQuery)) score = 1; // title starts with query
-    else if (normName.includes(normQuery))   score = 2; // title contains query
-    else if (normName.split(/\s+/).some(w => w.startsWith(normQuery))) score = 3; // a word starts with query
-    else continue; // no usable match
+    if (normName === normQuery)              score = 0;
+    else if (normName.startsWith(normQuery)) score = 1;
+    else if (normName.includes(normQuery))   score = 2;
+    else if (normName.split(/\s+/).some(w => w.startsWith(normQuery))) score = 3;
+    else continue;
     results.push({ track, score });
   }
 
@@ -1140,7 +1136,6 @@ function getSearchResults(query) {
     .map(r => r.track);
 }
 
-// Rebuild and show the dropdown based on what is currently in the input.
 function updateAutocomplete() {
   const query    = document.getElementById('guess-input').value.trim();
   const wrap     = document.getElementById('autocomplete-wrap');
@@ -1156,14 +1151,12 @@ function updateAutocomplete() {
 
   for (const track of results) {
     const item = document.createElement('div');
-    item.className       = 'autocomplete-item';
-    item.dataset.name    = track.name; // store original for retrieval
+    item.className    = 'autocomplete-item';
+    item.dataset.name = track.name;
     item.innerHTML =
       `<span class="item-name">${escapeHtml(track.name)}</span>` +
       `<span class="item-artist">${escapeHtml(track.artist)}</span>`;
 
-    // mousedown + preventDefault keeps the input focused while the user
-    // clicks a result, so the blur handler doesn't fire prematurely.
     item.addEventListener('mousedown', e => {
       e.preventDefault();
       selectAutocompleteItem(track.name);
@@ -1183,16 +1176,12 @@ function hideAutocomplete() {
   autocompleteIndex = -1;
 }
 
-// Fill the input with the chosen title and immediately check the guess.
 function selectAutocompleteItem(name) {
   document.getElementById('guess-input').value = name;
   hideAutocomplete();
   checkGuess();
 }
 
-// Keydown handler attached directly to the guess input.
-// Handles autocomplete navigation and prevents the Enter-to-check logic
-// from conflicting with dropdown selection.
 function onGuessKeydown(e) {
   const dropdown = document.getElementById('autocomplete-dropdown');
   const isOpen   = dropdown.style.display === 'block';
@@ -1223,7 +1212,6 @@ function onGuessKeydown(e) {
 
   if (e.key === 'Enter') {
     if (isOpen && items.length > 0) {
-      // Select highlighted item, or the first item if none highlighted
       const idx = autocompleteIndex >= 0 ? autocompleteIndex : 0;
       selectAutocompleteItem(items[idx].dataset.name);
     } else {
@@ -1275,17 +1263,14 @@ function normalizeForMatching(str) {
     .filter(k => onesMap[k] >= 1 && onesMap[k] <= 9).join('|');
   const allOnes  = Object.keys(onesMap).join('|');
 
-  // Pass 1 — compound: "twenty-two" / "twenty two" → "22"
   str = str.replace(
     new RegExp(`\\b(${tensKeys})[-\\s](${compOnes})\\b`, 'g'),
     (_, t, o) => String(tensMap[t] + onesMap[o])
   );
-  // Pass 2 — bare tens: "twenty" → "20"
   str = str.replace(
     new RegExp(`\\b(${tensKeys})\\b`, 'g'),
     (_, t) => String(tensMap[t])
   );
-  // Pass 3 — ones / teens: "one" → "1", "eleven" → "11", etc.
   str = str.replace(
     new RegExp(`\\b(${allOnes})\\b`, 'g'),
     (_, o) => String(onesMap[o])
@@ -1316,9 +1301,6 @@ window.addEventListener('DOMContentLoaded', () => {
   const savedId = localStorage.getItem('ew_client_id');
   if (savedId) document.getElementById('client-id-input').value = savedId;
 
-  // Hide the autocomplete if the user clicks or tabs away from the input.
-  // The 150 ms delay lets a mousedown on a dropdown item fire first so that
-  // selectAutocompleteItem() can act before the dropdown disappears.
   document.getElementById('guess-input').addEventListener('blur', () => {
     setTimeout(hideAutocomplete, 150);
   });

@@ -530,9 +530,6 @@
 </main>
 
 <script>
-// ═══════════════════════════════════════════════════════
-//  CONFIGURATION — edit CLIENT_ID here or enter it in UI
-// ═══════════════════════════════════════════════════════
 const SCOPES = [
   'user-read-playback-state',
   'user-modify-playback-state',
@@ -631,13 +628,10 @@ async function handleCallback(code) {
     }),
   });
   const data = await res.json();
-  if (data.error) {
-    setStatus('Auth failed: ' + data.error_description, true);
-    return;
-  }
+  if (data.error) { setStatus('Auth failed: ' + data.error_description, true); return; }
 
   accessToken = data.access_token;
-  localStorage.setItem('ew_token', accessToken);
+  localStorage.setItem('ew_token',     accessToken);
   localStorage.setItem('ew_token_exp', Date.now() + (data.expires_in - 60) * 1000);
   sessionStorage.removeItem('pkce_verifier');
 
@@ -695,10 +689,8 @@ function initSDK() {
 
   sdkPlayer.addListener('initialization_error', ({ message }) =>
     setStatus('SDK init error: ' + message, true));
-
   sdkPlayer.addListener('authentication_error', ({ message }) =>
     setStatus('SDK auth error: ' + message, true));
-
   sdkPlayer.addListener('account_error', () =>
     setStatus('Spotify Premium is required for in-browser playback.', true));
 
@@ -715,11 +707,7 @@ function showGameUI() {
   document.getElementById('disconnect-row').style.display = 'block';
 
   setStatus('Initialising playback player…');
-
-  if (window.Spotify) {
-    initSDK();
-  }
-
+  if (window.Spotify) initSDK();
   fetchUserPlaylists();
 }
 
@@ -736,7 +724,7 @@ async function spotifyGet(path) {
 }
 
 async function spotifyPut(path, body) {
-  const res = await fetch('https://api.spotify.com/v1' + path, {
+  return fetch('https://api.spotify.com/v1' + path, {
     method:  'PUT',
     headers: {
       Authorization:  'Bearer ' + accessToken,
@@ -744,7 +732,6 @@ async function spotifyPut(path, body) {
     },
     body: body ? JSON.stringify(body) : undefined,
   });
-  return res;
 }
 
 // ═══════════════════════════════════════════════════════
@@ -760,37 +747,32 @@ async function fetchUserPlaylists() {
   }
   userProfile = profile;
 
-  const owned  = [];
-  let offset   = 0;
-  const limit  = 50;
+  const owned = [];
+  let offset  = 0;
+  const limit = 50;
 
   while (true) {
     const data = await spotifyGet(`/me/playlists?limit=${limit}&offset=${offset}`);
     if (!data) break;
-
     for (const pl of data.items || []) {
       if (!pl || !pl.owner) continue;
       if (pl.owner.id === profile.id) owned.push(pl);
     }
-
     offset += limit;
     if (!data.next) break;
   }
 
   select.innerHTML = '<option value="">— select a playlist —</option>';
-
   if (owned.length === 0) {
     select.innerHTML = '<option value="">— no owned playlists found —</option>';
     return;
   }
-
   for (const pl of owned) {
     const opt = document.createElement('option');
     opt.value       = pl.id;
     opt.textContent = `${pl.name} (${pl.items.total})`;
     select.appendChild(opt);
   }
-
   select.disabled = false;
 }
 
@@ -827,7 +809,6 @@ async function loadPlaylist() {
     const data = await spotifyGet(
       `/playlists/${pid}/items?limit=${limit}&offset=${offset}`
     );
-
     if (!data) { setStatus('Could not load playlist. Check the URL.', true); return; }
 
     for (const item of data.items || []) {
@@ -862,7 +843,6 @@ function pickNextSong() {
   if (playlist.length === 0) return;
 
   currentTrack = playlist[Math.floor(Math.random() * playlist.length)];
-
   const maxStart = Math.max(0, currentTrack.duration_ms - 30000);
   clipStartMs = Math.floor(Math.random() * maxStart);
 
@@ -915,86 +895,87 @@ async function playClip() {
   const targetTrackId = currentTrack.id;
   const targetStart   = clipStartMs;
 
-  // ── Build detection promise before sending the play command ─────────────
-  //
-  // Two independent layers race each other; whichever fires first wins.
-  // Both are wired up synchronously here so neither can fire and be missed
-  // while we are suspended inside the spotifyPut await below.
-  //
-  // Layer 1 — native <audio> 'playing' event.
-  //   The browser fires this at the exact moment audio samples reach the
-  //   speaker pipeline.  This is the most accurate signal available.
-  //   However, the Spotify SDK often runs inside a sandboxed cross-origin
-  //   <iframe> for DRM isolation; in that case document.querySelector('audio')
-  //   returns null (cross-origin iframes are invisible to the parent page)
-  //   and this layer silently produces nothing.  A MutationObserver covers
-  //   the less common case where the SDK creates its <audio> element lazily
-  //   in the main document after the play command is issued.
-  //
-  // Layer 2 — SDK player_state_changed event.
-  //   Always reachable via the SDK's JS API regardless of iframe sandboxing.
-  //   Fires just before audio is audible (the SDK's state machine advances
-  //   slightly ahead of the audio pipeline).  We only accept the event once
-  //   state.position >= targetStart, which confirms the seek has completed
-  //   and the right part of the track is actually playing.
-  //
-  // Fallback — if neither layer fires within 6 s (e.g. extreme network
-  //   stall), resolve anyway so the UI does not hang permanently.
-  // ────────────────────────────────────────────────────────────────────────
+  // The Spotify Web Playback SDK drives audio through the Web Audio API
+  // internally — it does not create an HTMLMediaElement, so there is no
+  // <audio> element in the DOM to listen to. player_state_changed fires
+  // when the SDK transitions its state machine to "playing", which happens
+  // when it begins filling its audio buffer, roughly SDK_BUFFER_MS before
+  // the first sample actually reaches the speakers.
+  // We therefore wait for the SDK's reported position to advance by
+  // SDK_BUFFER_MS beyond where it was when player_state_changed fired.
+  // Because position advances at 1 ms per 1 ms of wall clock, this creates
+  // an approximately SDK_BUFFER_MS delay — matching the buffer drain time —
+  // so the bar and timer start at the moment audio becomes audible.
+  const SDK_BUFFER_MS = 1000;
 
-  let confirmed    = false;
+  let confirmed = false;
   let resolveStart;
   const audioStarted = new Promise(r => { resolveStart = r; });
 
-  // done() is the single resolution point shared by all layers.
-  // pos is the confirmed playback position at resolution time; it is used
-  // below to subtract any overshoot from the clip timer.
-  const done = (pos = targetStart) => {
+  const done = () => {
     if (confirmed) return;
     confirmed = true;
     clearTimeout(fallbackId);
     observer.disconnect();
     sdkPlayer.removeListener('player_state_changed', onSDKState);
-    resolveStart(pos);
+    resolveStart();
   };
 
-  // Layer 2: SDK state handler (defined before addListener call below)
-  const onSDKState = (state) => {
-    if (!state || state.paused) return;
-    if (state.track_window?.current_track?.id !== targetTrackId) return;
-    if (state.position < targetStart) return;
-    done(state.position);
-  };
-
-  // Layer 1: attach to an audio element; also check if already playing
-  // (covers the edge case where the element exists and is unpaused before
-  // we attach the listener — e.g. a rapid double-press of the play button)
+  // ── Layer 1: native <audio> 'playing' event (passive bonus) ───────────
+  // Kept in case a future SDK version exposes an HTMLMediaElement.
+  // Fires at the exact moment audio reaches the output device, which is
+  // more precise than Layer 2. On current SDK versions this never fires
+  // because no <audio> element exists; Layer 2 handles everything.
   const tryAudio = (el) => {
-    if (!el.paused) { done(targetStart); return; }
-    el.addEventListener('playing', () => done(targetStart), { once: true });
+    if (!el.paused) { done(); return; }
+    el.addEventListener('playing', done, { once: true });
   };
-
-  // MutationObserver catches <audio> elements created after this point
   const observer = new MutationObserver(mutations => {
     for (const m of mutations)
       for (const n of m.addedNodes) {
-        if (n.nodeType !== 1) continue;          // skip non-element nodes
+        if (n.nodeType !== 1) continue;
         if (n.nodeName === 'AUDIO') tryAudio(n);
         n.querySelectorAll('audio').forEach(tryAudio);
       }
   });
-
-  // fallbackId must be defined before tryAudio runs below, because
-  // tryAudio → done() → clearTimeout(fallbackId)
-  const fallbackId = setTimeout(() => done(targetStart), 6000);
-
-  // Register all listeners (synchronous — nothing else can run until
-  // we hit the first await, so no signal can be missed)
-  sdkPlayer.addListener('player_state_changed', onSDKState);
   observer.observe(document.documentElement, { childList: true, subtree: true });
   document.querySelectorAll('audio').forEach(tryAudio);
 
-  // ── Send the play command ───────────────────────────────────────────────
+  // ── Layer 2: player_state_changed → position-advance poll ─────────────
+  // When player_state_changed fires (SDK has started buffering), capture
+  // the current position as sdkStartPos, then poll getCurrentState() every
+  // 50 ms until position >= sdkStartPos + SDK_BUFFER_MS. At that point the
+  // buffer has drained through to the speakers and audio is audible.
+  const onSDKState = (state) => {
+    if (confirmed) return;
+    if (!state || state.paused) return;
+    if (state.track_window?.current_track?.id !== targetTrackId) return;
+    if (state.position < targetStart) return;
+
+    const sdkStartPos = state.position;
+    // Remove this listener; the polling loop takes over from here.
+    sdkPlayer.removeListener('player_state_changed', onSDKState);
+
+    (async () => {
+      while (!confirmed) {
+        const s = await sdkPlayer.getCurrentState();
+        if (confirmed) break;
+        if (s && !s.paused && s.position >= sdkStartPos + SDK_BUFFER_MS) {
+          done();
+          break;
+        }
+        await new Promise(r => setTimeout(r, 50));
+      }
+    })();
+  };
+  sdkPlayer.addListener('player_state_changed', onSDKState);
+
+  // Hard fallback: unblock the UI if neither layer fires within 8 s.
+  const fallbackId = setTimeout(done, 8000);
+
+  // ── Send the play command ─────────────────────────────────────────────
+  // All listeners above are registered synchronously before this point,
+  // so no signal can fire and be missed during the network round-trip.
   const r = await spotifyPut('/me/player/play?device_id=' + sdkDeviceId, {
     uris:         ['spotify:track:' + targetTrackId],
     position_ms:  targetStart,
@@ -1003,34 +984,31 @@ async function playClip() {
   if (r && !r.ok && r.status !== 204) {
     const err = await r.json().catch(() => ({}));
     setStatus('Playback error: ' + (err.error?.message || r.status), true);
-    done(); // clean up all listeners
+    done();
     return;
   }
 
-  // ── Wait for the first layer to confirm playback ────────────────────────
-  const confirmedPosition = await audioStarted;
+  // ── Wait until audio is confirmed audible ─────────────────────────────
+  await audioStarted;
 
   if (clipGeneration !== thisGen) return;
 
   setStatus('Playing…');
 
-  // Subtract any audio that already played during the detection window so
-  // the user always hears exactly clipSec seconds from this point forward.
-  const overshoot   = Math.max(0, confirmedPosition - targetStart);
-  const remainingMs = Math.max(100, clipSec * 1000 - overshoot);
-  const fraction    = remainingMs / (clipSec * 1000);
-
+  // done() fires at the moment audio becomes audible (Layer 1) or after
+  // the buffer has drained (Layer 2), so no overshoot adjustment is needed.
+  // Start bar and pause timer for exactly clipSec seconds from right now.
   wrap.style.display   = 'block';
   bar.style.transition = 'none';
-  bar.style.width      = `${fraction * 100}%`;
+  bar.style.width      = '100%';
   bar.getBoundingClientRect(); // force reflow so the transition fires correctly
-  bar.style.transition = `width ${remainingMs / 1000}s linear`;
+  bar.style.transition = `width ${clipSec}s linear`;
   bar.style.width      = '0%';
 
   playTimer = setTimeout(() => {
     sdkPlayer.pause();
     setStatus('Clip ended — make your guess!');
-  }, remainingMs);
+  }, clipSec * 1000);
 }
 
 function checkGuess() {
@@ -1038,7 +1016,7 @@ function checkGuess() {
   const guess = document.getElementById('guess-input').value.trim().toLowerCase();
   if (!guess) return;
 
-  const answer = currentTrack.name.toLowerCase();
+  const answer  = currentTrack.name.toLowerCase();
   const correct = answer.includes(guess) || guess.includes(answer) ||
     levenshtein(guess, answer) <= Math.floor(answer.length * 0.25);
 
@@ -1066,11 +1044,9 @@ function revealAnswer() {
     scored = true;
     updateScore();
   }
-
   const banner = document.getElementById('result-banner');
   banner.className = 'result-banner mt12 reveal';
   banner.innerHTML = `♪ "${currentTrack.name}" — ${currentTrack.artist}`;
-
   revealSong();
 }
 
@@ -1154,20 +1130,9 @@ window.addEventListener('DOMContentLoaded', () => {
   const code   = params.get('code');
   const error  = params.get('error');
 
-  if (error) {
-    setStatus('Spotify auth cancelled: ' + error, true);
-    return;
-  }
-
-  if (code) {
-    handleCallback(code);
-    return;
-  }
-
-  if (loadStoredToken()) {
-    showGameUI();
-    return;
-  }
+  if (error) { setStatus('Spotify auth cancelled: ' + error, true); return; }
+  if (code)  { handleCallback(code); return; }
+  if (loadStoredToken()) { showGameUI(); return; }
 });
 </script>
 

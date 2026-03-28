@@ -501,6 +501,7 @@ let scoreCorrect = 0;
 let scoreTotal   = 0;
 let playTimer    = null;
 let revealed     = false;
+let scored       = false;  // FIX (bug 3): track whether this song has been counted yet
 let sdkPlayer    = null;   // Spotify.Player instance
 let sdkDeviceId  = null;   // this browser tab's device ID
 let sdkReady     = false;
@@ -762,6 +763,7 @@ function pickNextSong() {
   });
 
   revealed = false;
+  scored   = false;  // FIX (bug 3): reset per-song scored flag
   document.getElementById('track-name').textContent    = '?';
   document.getElementById('track-artist').textContent  = '';
   document.getElementById('track-hint').textContent    =
@@ -851,26 +853,32 @@ function checkGuess() {
   const correct = answer.includes(guess) || guess.includes(answer) ||
     levenshtein(guess, answer) <= Math.floor(answer.length * 0.25);
 
-  scoreTotal++;
-  if (correct) scoreCorrect++;
-  updateScore();
-
+  // FIX (bug 3): only increment score once per song, and don't touch
+  // scoreTotal at all on a wrong guess
   const banner = document.getElementById('result-banner');
   if (correct) {
+    if (!scored) {
+      scoreTotal++;
+      scoreCorrect++;
+      scored = true;
+      updateScore();
+    }
     banner.className = 'result-banner mt12 correct';
     banner.innerHTML = `✓ Correct! "${currentTrack.name}" by ${currentTrack.artist}`;
+    revealSong();
   } else {
     banner.className = 'result-banner mt12 wrong';
     banner.innerHTML = `✗ Not quite. Try again or reveal the answer.`;
   }
-
-  if (correct) revealSong();
 }
 
 function revealAnswer() {
-  if (!currentTrack) return;
-  scoreTotal++;
-  updateScore();
+  if (!currentTrack || revealed) return;  // FIX (bug 4): guard against reveal after correct guess
+  if (!scored) {                          // FIX (bug 3): only count once per song
+    scoreTotal++;
+    scored = true;
+    updateScore();
+  }
 
   const banner = document.getElementById('result-banner');
   banner.className = 'result-banner mt12 reveal';
@@ -934,26 +942,8 @@ window.addEventListener('DOMContentLoaded', () => {
   const savedId = localStorage.getItem('ew_client_id');
   if (savedId) document.getElementById('client-id-input').value = savedId;
 
-  const params = new URLSearchParams(window.location.search);
-  const code   = params.get('code');
-  const error  = params.get('error');
-
-  if (error) {
-    setStatus('Spotify auth cancelled: ' + error, true);
-    return;
-  }
-
-  if (code) {
-    handleCallback(code);
-    return;
-  }
-
-  if (loadStoredToken()) {
-    showGameUI();
-    return;
-  }
-
-  // Keyboard shortcuts (ignored when typing in the guess input)
+  // FIX (bug 2): register keyboard shortcuts before early returns so they
+  // are always active regardless of which auth path was taken
   document.addEventListener('keydown', e => {
     const guessFocused = document.activeElement === document.getElementById('guess-input');
     if (guessFocused) return;
@@ -974,6 +964,25 @@ window.addEventListener('DOMContentLoaded', () => {
       }
     }
   });
+
+  const params = new URLSearchParams(window.location.search);
+  const code   = params.get('code');
+  const error  = params.get('error');
+
+  if (error) {
+    setStatus('Spotify auth cancelled: ' + error, true);
+    return;
+  }
+
+  if (code) {
+    handleCallback(code);
+    return;
+  }
+
+  if (loadStoredToken()) {
+    showGameUI();
+    return;
+  }
 });
 </script>
 

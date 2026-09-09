@@ -393,6 +393,84 @@
 
     .divider { height: 1px; background: var(--border); margin: 4px 0; }
 
+    /* ── History ── */
+    .history-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    .history-actions { display: flex; gap: 8px; }
+    .history-list {
+      display: none;
+      max-height: 360px;
+      overflow-y: auto;
+      margin-top: 14px;
+    }
+    .history-list.open { display: block; }
+    .history-day {
+      font-family: 'IBM Plex Mono', monospace;
+      font-size: 10px;
+      letter-spacing: 1.5px;
+      text-transform: uppercase;
+      color: var(--muted);
+      padding: 10px 2px 6px;
+      position: sticky;
+      top: 0;
+      background: var(--surface);
+    }
+    .history-item {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 10px 2px;
+      border-bottom: 1px solid var(--border);
+    }
+    .history-item:last-child { border-bottom: none; }
+    .history-time {
+      font-family: 'IBM Plex Mono', monospace;
+      font-size: 11px;
+      color: var(--muted);
+      width: 64px;
+      flex-shrink: 0;
+    }
+    .history-meta { flex: 1; min-width: 0; }
+    .history-track {
+      font-size: 13px;
+      font-weight: 600;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .history-sub {
+      font-family: 'IBM Plex Mono', monospace;
+      font-size: 11px;
+      color: var(--muted);
+      margin-top: 2px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .history-badge {
+      font-family: 'IBM Plex Mono', monospace;
+      font-size: 10px;
+      letter-spacing: 1px;
+      text-transform: uppercase;
+      padding: 4px 8px;
+      border-radius: 4px;
+      flex-shrink: 0;
+    }
+    .history-badge.correct  { background: rgba(29,185,84,0.12);  color: var(--green); }
+    .history-badge.wrong    { background: rgba(224,82,82,0.10);  color: var(--red); }
+    .history-badge.revealed { background: rgba(168,85,247,0.10); color: var(--amber); }
+    .history-badge.skipped  { background: var(--surface2); color: var(--muted); }
+    .history-empty {
+      font-family: 'IBM Plex Mono', monospace;
+      font-size: 12px;
+      color: var(--muted);
+      padding: 12px 2px;
+    }
+
     /* ── Countdown animation ── */
     @keyframes countdown-shrink {
       from { width: 100%; }
@@ -482,10 +560,32 @@
     </div>
   </div>
 
+  <!-- ══ STATS BAR ══ -->
+  <div class="card" id="stats-bar" style="display:none;">
+    <div class="card-label">All-Time Stats</div>
+    <div class="score-display mt12">
+      <div class="score-item">
+        <span class="score-num" id="stat-success-rate">—</span>
+        <span class="score-lbl">Success Rate</span>
+      </div>
+      <div class="score-item">
+        <span class="score-num" id="stat-avg-guesses">—</span>
+        <span class="score-lbl">Avg Guesses</span>
+      </div>
+      <div class="score-item">
+        <span class="score-num" id="stat-streak">0</span>
+        <span class="score-lbl">Streak</span>
+      </div>
+    </div>
+  </div>
+
   <!-- ══ SCORE BAR ══ -->
   <div class="card" id="score-bar">
-    <div class="card-label">Session Score</div>
-    <div class="score-display">
+    <div class="history-header">
+      <div class="card-label" style="margin-bottom:0;">Session Score</div>
+      <button class="btn btn-ghost" onclick="resetScore()">Reset</button>
+    </div>
+    <div class="score-display mt12">
       <div class="score-item">
         <span class="score-num" id="score-correct">0</span>
         <span class="score-lbl">Correct</span>
@@ -574,6 +674,18 @@
     </div>
   </div>
 
+  <!-- ══ HISTORY ══ -->
+  <div class="card" id="history-card" style="display:none;">
+    <div class="history-header">
+      <div class="card-label" style="margin-bottom:0;">History</div>
+      <div class="history-actions">
+        <button class="btn btn-ghost" id="history-toggle-btn" onclick="toggleHistory()">Show</button>
+        <button class="btn btn-ghost" onclick="clearHistory()">Clear</button>
+      </div>
+    </div>
+    <div class="history-list" id="history-list"></div>
+  </div>
+
   <!-- Disconnect -->
   <div id="disconnect-row" style="display:none; text-align:center;">
     <button class="btn btn-ghost" onclick="disconnect()">↩ Disconnect</button>
@@ -613,6 +725,9 @@ let autocompleteIndex = -1;
 let sdkPlayer         = null;
 let sdkDeviceId       = null;
 let sdkReady          = false;
+let history           = [];
+let currentRoundEntry = null;
+let historyOpen       = false;
 
 // ═══════════════════════════════════════════════════════
 //  PKCE HELPERS
@@ -756,9 +871,13 @@ function initSDK() {
 // ═══════════════════════════════════════════════════════
 function showGameUI() {
   document.getElementById('auth-screen').style.display    = 'none';
-  document.getElementById('setup-card').style.display     = 'block';
+  document.getElementById('stats-bar').style.display      = 'block';
   document.getElementById('score-bar').style.display      = 'block';
+  document.getElementById('setup-card').style.display     = 'block';
+  document.getElementById('history-card').style.display   = 'block';
   document.getElementById('disconnect-row').style.display = 'block';
+
+  renderStats();
 
   setStatus('Initialising playback player…');
   if (window.Spotify) initSDK();
@@ -896,9 +1015,21 @@ async function loadPlaylist() {
 function pickNextSong() {
   if (playlist.length === 0) return;
 
+  finalizeRound('skipped');
+
   currentTrack = playlist[Math.floor(Math.random() * playlist.length)];
   const maxStart = Math.max(0, currentTrack.duration_ms - 30000);
   clipStartMs = Math.floor(Math.random() * maxStart);
+
+  currentRoundEntry = {
+    playedAt:    Date.now(),
+    name:        currentTrack.name,
+    artist:      currentTrack.artist,
+    clipStartMs: clipStartMs,
+    clipSec:     0,
+    guesses:     [],
+    result:      null,
+  };
 
   selectedSec = 1;
   document.querySelectorAll('.dur-btn').forEach(b => {
@@ -954,6 +1085,7 @@ async function playClip() {
   const clipSec       = selectedSec;
   const targetTrackId = currentTrack.id;
   const targetStart   = clipStartMs;
+  const targetRound    = currentRoundEntry;
 
   const SDK_BUFFER_MS = 1000;
 
@@ -1025,6 +1157,16 @@ async function playClip() {
   await audioStarted;
   if (clipGeneration !== thisGen) return;
 
+  // Track the longest clip length actually played this round, regardless
+  // of what's selected by the time a guess is made. Uses the round entry
+  // captured when playback started, so it still attributes correctly even
+  // if the user has already moved on to the next song by the time this
+  // resolves.
+  if (targetRound) {
+    targetRound.clipSec = Math.max(targetRound.clipSec, clipSec);
+    if (historyOpen && history.includes(targetRound)) { saveHistory(); renderHistory(); }
+  }
+
   setStatus('Playing…');
 
   bar.getBoundingClientRect();
@@ -1048,6 +1190,7 @@ function checkGuess() {
   // The autocomplete fills in the precise title, so an exact normalised
   // comparison is both sufficient and correct.
   const correct = normalizeForMatching(rawGuess) === normalizeForMatching(currentTrack.name);
+  recordGuessAttempt(rawGuess, correct);
 
   const banner = document.getElementById('result-banner');
   if (correct) {
@@ -1059,6 +1202,7 @@ function checkGuess() {
     }
     banner.className = 'result-banner mt12 correct';
     banner.innerHTML = `✓ Correct! "${currentTrack.name}" by ${currentTrack.artist}`;
+    finalizeRound('correct');
     revealSong();
   } else {
     scoreIncorrect++;
@@ -1081,6 +1225,7 @@ function revealAnswer() {
   const banner = document.getElementById('result-banner');
   banner.className = 'result-banner mt12 reveal';
   banner.innerHTML = `♪ "${currentTrack.name}" — ${currentTrack.artist}`;
+  finalizeRound('revealed');
   revealSong();
 }
 
@@ -1102,6 +1247,217 @@ function updateScore() {
   document.getElementById('score-correct').textContent   = scoreCorrect;
   document.getElementById('score-incorrect').textContent = scoreIncorrect;
   document.getElementById('score-total').textContent     = scoreTotal;
+  saveScore();
+}
+
+// ═══════════════════════════════════════════════════════
+//  SCORE PERSISTENCE
+// ═══════════════════════════════════════════════════════
+const SCORE_KEY = 'ew_score';
+
+// The score is intentionally decoupled from the Spotify auth session —
+// it survives token expiry, disconnects, and page reloads. It only
+// changes when a round is scored or the user hits Reset.
+//
+// streakResetAt is a marker timestamp: streak calculation (see
+// computeStats) ignores any history entries played at or before this
+// point, so hitting Reset can zero out the current streak without
+// touching the underlying history — success rate and avg guesses, which
+// are computed from the full history log, are unaffected.
+let streakResetAt = 0;
+
+function loadScore() {
+  try {
+    const s = JSON.parse(localStorage.getItem(SCORE_KEY) || '{}');
+    scoreCorrect   = s.correct   || 0;
+    scoreIncorrect = s.incorrect || 0;
+    scoreTotal     = s.total     || 0;
+    streakResetAt  = s.streakResetAt || 0;
+  } catch {
+    scoreCorrect = scoreIncorrect = scoreTotal = 0;
+    streakResetAt = 0;
+  }
+}
+
+function saveScore() {
+  try {
+    localStorage.setItem(SCORE_KEY, JSON.stringify({
+      correct:       scoreCorrect,
+      incorrect:     scoreIncorrect,
+      total:         scoreTotal,
+      streakResetAt: streakResetAt,
+    }));
+  } catch {
+    // storage full or unavailable — score just won't persist this session
+  }
+}
+
+function resetScore() {
+  if (!confirm('Reset session score and current streak? All-time success rate and avg guesses will be kept.')) return;
+  scoreCorrect = scoreIncorrect = scoreTotal = 0;
+  streakResetAt = Date.now();
+  updateScore();
+  renderStats();
+}
+
+// ═══════════════════════════════════════════════════════
+//  HISTORY
+// ═══════════════════════════════════════════════════════
+const HISTORY_KEY = 'ew_history';
+
+function loadHistory() {
+  try {
+    history = JSON.parse(localStorage.getItem(HISTORY_KEY) || '[]');
+  } catch {
+    history = [];
+  }
+}
+
+function saveHistory() {
+  try {
+    localStorage.setItem(HISTORY_KEY, JSON.stringify(history));
+  } catch {
+    // storage full or unavailable — history just won't persist this session
+  }
+}
+
+// Called whenever a guess attempt is checked, so the full attempt log
+// (not just the final outcome) is preserved per round. Each guess snapshots
+// the max clip length played *up to that point* — this is per-guess, not
+// per-song, since two guesses in the same round can have different amounts
+// of clip played before them (e.g. 1s+2s before guess #1, then +3s before
+// guess #2 -> guess #1 records 2s, guess #2 records 3s).
+function recordGuessAttempt(text, correct) {
+  if (!currentRoundEntry) return;
+  currentRoundEntry.guesses.push({
+    text,
+    correct,
+    at:      Date.now(),
+    clipSec: currentRoundEntry.clipSec,
+  });
+}
+
+// Closes out the current round (if one is open) with a result and files
+// it into history. Safe to call even if there's nothing to finalize.
+// currentRoundEntry.clipSec is already tracked as a running max across
+// every clip actually played this round (see playClip), so it's left
+// as-is here rather than overwritten with the currently selected length.
+function finalizeRound(result) {
+  if (!currentRoundEntry || currentRoundEntry.result) return;
+  currentRoundEntry.result = result;
+  history.unshift(currentRoundEntry);
+  saveHistory();
+  if (historyOpen) renderHistory();
+  renderStats();
+}
+
+// ═══════════════════════════════════════════════════════
+//  ALL-TIME STATS  (derived from history, most-recent-first)
+// ═══════════════════════════════════════════════════════
+function computeStats() {
+  const total = history.length;
+
+  // Success rate: only songs guessed correctly on the very first attempt
+  // count as a success. Multi-guess correct answers, reveals, and skips
+  // all count against it.
+  const firstGuessCorrect = history.filter(
+    e => e.result === 'correct' && e.guesses.length === 1
+  ).length;
+  const successRate = total ? Math.round((firstGuessCorrect / total) * 100) : null;
+
+  // Avg guesses per song: only over songs eventually guessed correctly
+  // (reveals/skips excluded), counting every attempt including the win.
+  const solved = history.filter(e => e.result === 'correct');
+  const avgGuesses = solved.length
+    ? solved.reduce((sum, e) => sum + e.guesses.length, 0) / solved.length
+    : null;
+
+  // Current streak: consecutive most-recent songs guessed correctly on the
+  // first attempt. Any wrong guess, reveal, or skip breaks it — the streak
+  // only resumes counting from the next fresh song onward. Entries at or
+  // before streakResetAt are never counted, so hitting Reset zeroes the
+  // streak without touching history or the stats above.
+  let streak = 0;
+  for (const e of history) {
+    if (e.playedAt <= streakResetAt) break;
+    if (e.result === 'correct' && e.guesses.length === 1) streak++;
+    else break;
+  }
+
+  return { successRate, avgGuesses, streak };
+}
+
+function renderStats() {
+  const { successRate, avgGuesses, streak } = computeStats();
+  document.getElementById('stat-success-rate').textContent =
+    successRate === null ? '—' : successRate + '%';
+  document.getElementById('stat-avg-guesses').textContent =
+    avgGuesses === null ? '—' : avgGuesses.toFixed(1);
+  document.getElementById('stat-streak').textContent = streak;
+}
+
+function toggleHistory() {
+  historyOpen = !historyOpen;
+  const list = document.getElementById('history-list');
+  const btn  = document.getElementById('history-toggle-btn');
+  list.classList.toggle('open', historyOpen);
+  btn.textContent = historyOpen ? 'Hide' : 'Show';
+  if (historyOpen) renderHistory();
+}
+
+function clearHistory() {
+  if (!confirm('Clear all guessing history? This cannot be undone.')) return;
+  history = [];
+  saveHistory();
+  renderHistory();
+  renderStats();
+}
+
+function renderHistory() {
+  const list = document.getElementById('history-list');
+  if (history.length === 0) {
+    list.innerHTML = '<div class="history-empty">No rounds played yet.</div>';
+    return;
+  }
+
+  const badgeLabel = {
+    correct:  '✓ Correct',
+    wrong:    '✗ Wrong',
+    revealed: '◎ Revealed',
+    skipped:  '→ Skipped',
+  };
+
+  let html = '';
+  let lastDay = null;
+
+  for (const entry of history) {
+    const d   = new Date(entry.playedAt);
+    const day = d.toLocaleDateString(undefined, { weekday: 'short', year: 'numeric', month: 'short', day: 'numeric' });
+    if (day !== lastDay) {
+      html += `<div class="history-day">${escapeHtml(day)}</div>`;
+      lastDay = day;
+    }
+
+    const time     = d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+    const result   = entry.result || 'skipped';
+    const badge    = badgeLabel[result] || result;
+    const clipInfo = `clip @ ${formatMs(entry.clipStartMs)}` + (entry.clipSec ? ` · up to ${entry.clipSec}s played` : '');
+    const attempts = entry.guesses.length
+      ? ` · ${entry.guesses.length} guess${entry.guesses.length === 1 ? '' : 'es'}`
+      : '';
+
+    html +=
+      `<div class="history-item">` +
+        `<div class="history-time">${time}</div>` +
+        `<div class="history-meta">` +
+          `<div class="history-track">${escapeHtml(entry.name)}</div>` +
+          `<div class="history-sub">${escapeHtml(entry.artist)} · ${clipInfo}${attempts}</div>` +
+        `</div>` +
+        `<div class="history-badge ${result}">${badge}</div>` +
+      `</div>`;
+  }
+
+  list.innerHTML = html;
 }
 
 // ═══════════════════════════════════════════════════════
@@ -1298,6 +1654,9 @@ function levenshtein(a, b) {
 // ═══════════════════════════════════════════════════════
 window.addEventListener('DOMContentLoaded', () => {
   showRedirectURI();
+  loadHistory();
+  loadScore();
+  updateScore();
 
   const savedId = localStorage.getItem('ew_client_id');
   if (savedId) document.getElementById('client-id-input').value = savedId;

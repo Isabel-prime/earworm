@@ -1501,7 +1501,7 @@ function renderHistory() {
     const time     = d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
     const result   = entry.result || 'skipped';
     const badge    = badgeLabel[result] || result;
-    const clipInfo = `clip @ ${formatMs(entry.clipStartMs)}` + (entry.clipSec ? ` · up to ${entry.clipSec}s played` : '');
+    const clipInfo = `clip @ ${formatMs(entry.clipStartMs)}` + (entry.clipSec ? ` · ${entry.clipSec}s` : '');
     const attempts = entry.guesses.length
       ? ` · ${entry.guesses.length} guess${entry.guesses.length === 1 ? '' : 'es'}`
       : ' · no guesses';

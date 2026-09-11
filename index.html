@@ -18,6 +18,12 @@
       --text:      #e8e0d0;
       --muted:     #6b6560;
       --radius:    6px;
+      /* Deliberately isolated exception to the purple/green/grey palette:
+         used ONLY by .sync-expired-banner below, per explicit request, so
+         an expired sync token is impossible to miss. Not used anywhere
+         else — every other warning/incorrect/error state in the app
+         intentionally stays grey/white. */
+      --sync-warn: #e05252;
     }
 
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -353,6 +359,33 @@
     }
     #status.err { color: var(--text); font-weight: 600; }
 
+    /* ── Sync-expired warning (see --sync-warn note above) ── */
+    .sync-expired-banner {
+      display: none;
+      background: rgba(224,82,82,0.14);
+      border: 1px solid var(--sync-warn);
+      color: var(--sync-warn);
+      border-radius: var(--radius);
+      padding: 14px 16px;
+      font-family: 'IBM Plex Mono', monospace;
+      font-size: 12px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      text-align: center;
+      line-height: 1.7;
+    }
+    .sync-expired-banner.show { display: block; }
+    .sync-expired-banner .sub {
+      display: block;
+      text-transform: none;
+      font-weight: 500;
+      color: var(--text);
+      font-size: 11px;
+      margin-top: 6px;
+      letter-spacing: normal;
+    }
+
     /* ── Auth screen ── */
     #auth-screen {
       display: flex;
@@ -556,6 +589,12 @@
 
 <main>
 
+  <!-- SYNC-EXPIRED WARNING -->
+  <div class="sync-expired-banner" id="sync-expired-banner">
+    SYNC TOKEN EXPIRED — HISTORY IS NOT SYNCING
+    <span class="sub">Everything is still being saved on this device. It'll upload automatically once you add a new token in the Cross-Device Sync card below.</span>
+  </div>
+
   <!-- STATUS -->
   <div id="status"></div>
 
@@ -705,6 +744,34 @@
       </div>
     </div>
     <div class="history-list" id="history-list"></div>
+  </div>
+
+  <!-- ══ SYNC ══ -->
+  <div class="card" id="sync-card" style="display:none;">
+    <div class="card-label">Cross-Device Sync</div>
+    <p class="auth-info" style="font-size:12px; line-height:1.7;">
+      Syncs your score, streak, and history to a private GitHub Gist so both
+      your devices stay in sync. Uses a GitHub Personal Access Token
+      (<code style="color:var(--amber);">gist</code> scope only) — see the
+      setup guide for step-by-step instructions.
+    </p>
+
+    <div class="mt12">
+      <input type="password" id="sync-token-input" placeholder="GitHub Personal Access Token…" autocomplete="off" spellcheck="false" />
+    </div>
+    <div class="mt8">
+      <input type="text" id="sync-gist-id-input" placeholder="Gist ID (leave blank to create new)…" autocomplete="off" spellcheck="false" />
+    </div>
+
+    <div class="flex-gap mt12">
+      <button class="btn btn-primary" style="flex:1" id="sync-connect-btn" onclick="handleSyncConnectClick()">Connect</button>
+      <button class="btn btn-ghost" style="flex:1" onclick="manualSync()">Sync Now</button>
+    </div>
+    <div class="mt8" style="text-align:center;">
+      <button class="btn btn-ghost" onclick="disconnectSync()">Disconnect Sync</button>
+    </div>
+
+    <div class="mt12" id="sync-status" style="font-family:'IBM Plex Mono',monospace; font-size:11px; color:var(--muted); text-align:center;"></div>
   </div>
 
   <!--
@@ -950,6 +1017,7 @@ function showGameUI() {
   document.getElementById('score-bar').style.display      = 'block';
   document.getElementById('setup-card').style.display     = 'block';
   document.getElementById('history-card').style.display   = 'block';
+  document.getElementById('sync-card').style.display      = 'block';
   document.getElementById('disconnect-row').style.display = 'block';
 
   renderStats();
@@ -1319,11 +1387,16 @@ function nextSong() {
   pickNextSong();
 }
 
-function updateScore() {
+function refreshScoreDOM() {
   document.getElementById('score-correct').textContent   = scoreCorrect;
   document.getElementById('score-incorrect').textContent = scoreIncorrect;
   document.getElementById('score-total').textContent     = scoreTotal;
+}
+
+function updateScore() {
+  refreshScoreDOM();
   saveScore();
+  scheduleSyncPush();
 }
 
 // ═══════════════════════════════════════════════════════
@@ -1342,6 +1415,15 @@ const SCORE_KEY = 'ew_score';
 // are computed from the full history log, are unaffected.
 let streakResetAt = 0;
 
+// scoreUpdatedAt tracks when the score last changed *locally*, in
+// milliseconds since epoch. It's the basis for last-write-wins conflict
+// resolution when syncing with another device (see mergeRemoteIntoLocal) —
+// whichever device has the newer updatedAt wins. When adopting a value
+// pulled from sync, we preserve that value's own updatedAt (see
+// adoptRemoteScore) rather than stamping "now", so the comparison stays
+// meaningful on the next sync instead of always favoring local.
+let scoreUpdatedAt = 0;
+
 function loadScore() {
   try {
     const s = JSON.parse(localStorage.getItem(SCORE_KEY) || '{}');
@@ -1349,23 +1431,48 @@ function loadScore() {
     scoreIncorrect = s.incorrect || 0;
     scoreTotal     = s.total     || 0;
     streakResetAt  = s.streakResetAt || 0;
+    scoreUpdatedAt = s.updatedAt || 0;
   } catch {
     scoreCorrect = scoreIncorrect = scoreTotal = 0;
     streakResetAt = 0;
+    scoreUpdatedAt = 0;
   }
 }
 
 function saveScore() {
+  scoreUpdatedAt = Date.now();
   try {
     localStorage.setItem(SCORE_KEY, JSON.stringify({
       correct:       scoreCorrect,
       incorrect:     scoreIncorrect,
       total:         scoreTotal,
       streakResetAt: streakResetAt,
+      updatedAt:     scoreUpdatedAt,
     }));
   } catch {
     // storage full or unavailable — score just won't persist this session
   }
+}
+
+// Adopts a score payload pulled from sync. Deliberately bypasses saveScore()
+// so we can persist the REMOTE's updatedAt rather than "now" — otherwise
+// every pull would make local look newer than remote, breaking the
+// last-write-wins comparison on the next sync.
+function adoptRemoteScore(remote) {
+  scoreCorrect   = remote.correct       || 0;
+  scoreIncorrect = remote.incorrect     || 0;
+  scoreTotal     = remote.total         || 0;
+  streakResetAt  = remote.streakResetAt || 0;
+  scoreUpdatedAt = remote.updatedAt     || Date.now();
+  try {
+    localStorage.setItem(SCORE_KEY, JSON.stringify({
+      correct: scoreCorrect, incorrect: scoreIncorrect, total: scoreTotal,
+      streakResetAt, updatedAt: scoreUpdatedAt,
+    }));
+  } catch {
+    // storage full or unavailable — adopted score just won't persist
+  }
+  refreshScoreDOM();
 }
 
 function resetScore() {
@@ -1435,6 +1542,8 @@ function finalizeRound(result) {
   saveHistory();
   if (historyOpen) renderHistory();
   renderStats();
+  markDateTouched(dateKey(currentRoundEntry.playedAt));
+  scheduleSyncPush();
 }
 
 // ═══════════════════════════════════════════════════════
@@ -1582,6 +1691,367 @@ function renderHistory() {
   });
 
   list.innerHTML = html;
+}
+
+// ═══════════════════════════════════════════════════════
+//  CROSS-DEVICE SYNC (GitHub Gist)
+// ═══════════════════════════════════════════════════════
+// Strategy: one private Gist holds a tiny score.json (score + streak
+// marker + updatedAt) and one history-YYYY-MM-DD.json file per calendar
+// day. Every push only rewrites score.json plus whatever day-files were
+// actually touched this session (syncTouchedDates) — the Gist API updates
+// files independently, so every earlier day's file is left completely
+// alone forever, regardless of how long the history log gets. Pulls
+// merge remote data into local by id-union (history) or last-write-wins
+// via updatedAt (score), so using both devices on the same day is safe.
+
+const GIST_TOKEN_KEY         = 'ew_gist_token';
+const GIST_ID_KEY            = 'ew_gist_id';
+const GIST_SCORE_FILE        = 'score.json';
+const GIST_HISTORY_PREFIX    = 'history-';
+const PENDING_SYNC_DATES_KEY = 'ew_gist_pending_dates';
+
+// If a push is about to happen more than this long after we last
+// confirmed the remote state, we do a quick pull-and-merge first (see
+// pushSync). This is what keeps a long-lived session — e.g. a phone tab
+// left open for hours without reloading — from pushing a day-file that's
+// missing rounds another device saved in the meantime, without requiring
+// an extra round-trip on every single push during normal active play.
+const STALE_PULL_MS = 30 * 60 * 1000; // 30 minutes
+
+let syncToken        = null;
+let syncGistId       = null;
+let syncTouchedDates = new Set();
+let syncBusy         = false;
+let syncPushTimer    = null;
+let lastPullAt       = 0;
+
+// True only when the last GitHub response was specifically a 401 (bad/
+// expired/revoked token) — never set for plain network failures, since
+// those aren't necessarily a token problem. Drives the loud banner.
+let syncAuthExpired  = false;
+
+function dateKey(ts) {
+  const d = new Date(ts);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+function renderSyncWarning() {
+  const el = document.getElementById('sync-expired-banner');
+  if (el) el.classList.toggle('show', syncAuthExpired);
+}
+
+// Pending dates are persisted (not just kept in memory) so that if the
+// token expires and you close the app entirely — e.g. traveling, no way
+// to generate a new token until later — the list of day-files still
+// waiting to be pushed survives across reloads/restarts. Nothing here
+// affects local play or local history recording either way.
+function loadPendingSyncDates() {
+  try {
+    const arr = JSON.parse(localStorage.getItem(PENDING_SYNC_DATES_KEY) || '[]');
+    syncTouchedDates = new Set(arr);
+  } catch {
+    syncTouchedDates = new Set();
+  }
+}
+
+function savePendingSyncDates() {
+  try {
+    localStorage.setItem(PENDING_SYNC_DATES_KEY, JSON.stringify(Array.from(syncTouchedDates)));
+  } catch {
+    // storage full or unavailable — pending list just won't persist
+  }
+}
+
+function markDateTouched(dateStr) {
+  syncTouchedDates.add(dateStr);
+  savePendingSyncDates();
+}
+
+function loadSyncConfig() {
+  syncToken  = localStorage.getItem(GIST_TOKEN_KEY) || null;
+  syncGistId = localStorage.getItem(GIST_ID_KEY) || null;
+  loadPendingSyncDates();
+  const tokenInput = document.getElementById('sync-token-input');
+  const gistInput  = document.getElementById('sync-gist-id-input');
+  if (tokenInput && syncToken)  tokenInput.value = syncToken;
+  if (gistInput  && syncGistId) gistInput.value  = syncGistId;
+}
+
+function saveSyncConfig() {
+  if (syncToken)  localStorage.setItem(GIST_TOKEN_KEY, syncToken);  else localStorage.removeItem(GIST_TOKEN_KEY);
+  if (syncGistId) localStorage.setItem(GIST_ID_KEY, syncGistId);    else localStorage.removeItem(GIST_ID_KEY);
+}
+
+function syncConfigured() {
+  return !!(syncToken && syncGistId);
+}
+
+function setSyncStatus(msg, isErr = false) {
+  const el = document.getElementById('sync-status');
+  if (!el) return;
+  el.textContent = msg;
+  el.style.color = isErr ? 'var(--text)' : 'var(--muted)';
+  el.style.fontWeight = isErr ? '600' : 'normal';
+}
+
+function historyForDate(dateStr) {
+  return guessHistory.filter(e => dateKey(e.playedAt) === dateStr);
+}
+
+function allHistoryDates() {
+  return Array.from(new Set(guessHistory.map(e => dateKey(e.playedAt))));
+}
+
+function buildScorePayload() {
+  // Uses whatever scoreUpdatedAt currently is (bumped by saveScore()
+  // whenever the score last actually changed locally) rather than
+  // stamping "now" here, so a push doesn't manufacture false recency.
+  return {
+    correct: scoreCorrect, incorrect: scoreIncorrect, total: scoreTotal,
+    streakResetAt, updatedAt: scoreUpdatedAt,
+  };
+}
+
+async function githubApiRequest(url, method, body) {
+  return fetch(url, {
+    method,
+    headers: {
+      'Authorization':        'token ' + syncToken,
+      'Accept':               'application/vnd.github+json',
+      'X-GitHub-Api-Version': '2022-11-28',
+      'Content-Type':         'application/json',
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+}
+
+function handleSyncConnectClick() {
+  const gistIdInput = document.getElementById('sync-gist-id-input').value.trim();
+  if (gistIdInput) linkSyncGist(); else createSyncGist();
+}
+
+async function createSyncGist() {
+  const tokenInput = document.getElementById('sync-token-input').value.trim();
+  if (!tokenInput) { setSyncStatus('Enter a GitHub token first.', true); return; }
+  syncToken = tokenInput;
+
+  syncBusy = true;
+  setSyncStatus('Creating gist…');
+
+  const files = { [GIST_SCORE_FILE]: { content: JSON.stringify(buildScorePayload()) } };
+  for (const dateStr of allHistoryDates()) {
+    files[GIST_HISTORY_PREFIX + dateStr + '.json'] = { content: JSON.stringify(historyForDate(dateStr)) };
+  }
+
+  try {
+    const res = await githubApiRequest('https://api.github.com/gists', 'POST', {
+      description: 'Earworm sync data (managed by the app — do not edit manually)',
+      public: false,
+      files,
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      if (res.status === 401) { syncAuthExpired = true; renderSyncWarning(); }
+      setSyncStatus('Gist creation failed: ' + (data.message || res.status), true);
+      syncBusy = false;
+      return;
+    }
+    syncAuthExpired = false;
+    renderSyncWarning();
+
+    syncGistId = data.id;
+    saveSyncConfig();
+    document.getElementById('sync-gist-id-input').value = syncGistId;
+    setSyncStatus('Created — Gist ID: ' + syncGistId + '. Paste this same ID (and this same token) into the other device.');
+  } catch (err) {
+    setSyncStatus('Network error creating gist: ' + err.message, true);
+  }
+  syncBusy = false;
+}
+
+async function linkSyncGist() {
+  const tokenInput  = document.getElementById('sync-token-input').value.trim();
+  const gistIdInput = document.getElementById('sync-gist-id-input').value.trim();
+  if (!tokenInput || !gistIdInput) { setSyncStatus('Enter both a token and a Gist ID.', true); return; }
+  syncToken  = tokenInput;
+  syncGistId = gistIdInput;
+  saveSyncConfig();
+
+  // Pull FIRST, before touching anything else — this merges whatever's
+  // already in the gist into local guessHistory (by id, so nothing local
+  // is lost) before we go anywhere near a push. Only once that's done do
+  // we mark every local date as needing a push, so any history that was
+  // recorded here but never made it to the gist (e.g. everything played
+  // while the old token was expired, or pre-existing local history from
+  // before this device was ever connected) gets uploaded right away
+  // instead of silently waiting for the next round played.
+  const pulled = await pullSync();
+  if (!pulled) return;
+
+  for (const dateStr of allHistoryDates()) markDateTouched(dateStr);
+  await pushSync();
+}
+
+function disconnectSync() {
+  syncToken  = null;
+  syncGistId = null;
+  syncTouchedDates.clear();
+  localStorage.removeItem(PENDING_SYNC_DATES_KEY);
+  clearTimeout(syncPushTimer);
+  saveSyncConfig();
+  syncAuthExpired = false;
+  renderSyncWarning();
+  document.getElementById('sync-token-input').value = '';
+  document.getElementById('sync-gist-id-input').value = '';
+  setSyncStatus('Sync disconnected. Local data is unaffected.');
+}
+
+// restrictToDates, if given (a Set of 'YYYY-MM-DD' strings), limits which
+// remote day-files get merged in — used for the "quick" pre-push check
+// (see pushSync) so a stale-session push only has to reconcile the day(s)
+// it's actually about to write, not the entire history. Pass null/omit
+// for a full merge across every day-file present (normal pullSync case).
+function mergeRemoteIntoLocal(files, restrictToDates = null) {
+  const scoreFile = files[GIST_SCORE_FILE];
+  if (scoreFile && scoreFile.content) {
+    try {
+      const remote = JSON.parse(scoreFile.content);
+      if ((remote.updatedAt || 0) > scoreUpdatedAt) adoptRemoteScore(remote);
+    } catch {
+      // malformed remote score.json — ignore and keep local
+    }
+  }
+
+  const remoteEntries = [];
+  for (const [name, file] of Object.entries(files)) {
+    if (!name.startsWith(GIST_HISTORY_PREFIX) || !name.endsWith('.json') || !file.content) continue;
+    if (restrictToDates) {
+      const dateStr = name.slice(GIST_HISTORY_PREFIX.length, -'.json'.length);
+      if (!restrictToDates.has(dateStr)) continue;
+    }
+    try {
+      const arr = JSON.parse(file.content);
+      if (Array.isArray(arr)) remoteEntries.push(...arr);
+    } catch {
+      // malformed remote day-file — skip just that file
+    }
+  }
+  if (remoteEntries.length) {
+    const byId = new Map();
+    for (const e of guessHistory)  if (e.id) byId.set(e.id, e);
+    for (const e of remoteEntries) if (e.id) byId.set(e.id, e);
+    guessHistory = Array.from(byId.values()).sort((a, b) => b.playedAt - a.playedAt);
+    saveHistory();
+  }
+
+  renderStats();
+  if (historyOpen) renderHistory();
+}
+
+// Fetches the gist and merges it into local state (history via id-union,
+// score via last-write-wins on updatedAt). Returns {ok:true} or
+// {ok:false, message}. Shared by pullSync (the user-facing "Sync Now" /
+// reconnect action) and pushSync (which always merges the latest remote
+// state immediately before writing — see pushSync for why).
+async function fetchAndMergeRemote(restrictToDates = null) {
+  const res = await githubApiRequest('https://api.github.com/gists/' + syncGistId, 'GET');
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    if (res.status === 401) { syncAuthExpired = true; renderSyncWarning(); }
+    return { ok: false, message: data.message || res.status };
+  }
+  syncAuthExpired = false;
+  renderSyncWarning();
+  const data = await res.json();
+  mergeRemoteIntoLocal(data.files || {}, restrictToDates);
+  lastPullAt = Date.now();
+  return { ok: true };
+}
+
+async function pullSync() {
+  if (!syncConfigured()) return false;
+  syncBusy = true;
+  setSyncStatus('Syncing…');
+  try {
+    const result = await fetchAndMergeRemote();
+    if (!result.ok) { setSyncStatus('Sync failed: ' + result.message, true); syncBusy = false; return false; }
+    setSyncStatus('Synced just now.');
+    syncBusy = false;
+    return true;
+  } catch (err) {
+    // Network-level failure (offline, DNS, blocked, etc.) — deliberately
+    // NOT treated as an expired token, since we can't tell the difference
+    // here. The banner only fires on a confirmed 401 from GitHub above.
+    setSyncStatus('Network error syncing: ' + err.message, true);
+    syncBusy = false;
+    return false;
+  }
+}
+
+async function pushSync() {
+  if (!syncConfigured()) return;
+  syncBusy = true;
+
+  // If we haven't confirmed the remote state recently, do a quick
+  // pull-and-merge first — restricted to just the day(s) we're about to
+  // write, not the whole history, since that's all that's actually at
+  // risk of being overwritten. Common case: exactly one date ("today"),
+  // so this is cheap even when it does kick in. Skipped entirely during
+  // normal active play, since app-load/reconnect already pulled recently.
+  if (Date.now() - lastPullAt > STALE_PULL_MS) {
+    try {
+      const quick = await fetchAndMergeRemote(new Set(syncTouchedDates));
+      if (!quick.ok) {
+        setSyncStatus('Push failed: ' + quick.message, true);
+        syncBusy = false;
+        return;
+      }
+    } catch (err) {
+      setSyncStatus('Network error syncing: ' + err.message, true);
+      syncBusy = false;
+      return;
+    }
+  }
+
+  const files = { [GIST_SCORE_FILE]: { content: JSON.stringify(buildScorePayload()) } };
+  for (const dateStr of syncTouchedDates) {
+    files[GIST_HISTORY_PREFIX + dateStr + '.json'] = { content: JSON.stringify(historyForDate(dateStr)) };
+  }
+
+  try {
+    const res = await githubApiRequest('https://api.github.com/gists/' + syncGistId, 'PATCH', { files });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      if (res.status === 401) { syncAuthExpired = true; renderSyncWarning(); }
+      setSyncStatus('Push failed: ' + (data.message || res.status), true);
+      syncBusy = false;
+      return;
+    }
+    syncAuthExpired = false;
+    renderSyncWarning();
+    syncTouchedDates.clear();
+    localStorage.removeItem(PENDING_SYNC_DATES_KEY);
+    lastPullAt = Date.now(); // a successful push also confirms we're current with remote
+    setSyncStatus('Synced just now.');
+  } catch (err) {
+    setSyncStatus('Network error syncing: ' + err.message, true);
+  }
+  syncBusy = false;
+}
+
+// Debounced so a burst of local changes (e.g. finishing a round right
+// after a reset) results in one push, not several back-to-back.
+function scheduleSyncPush() {
+  if (!syncConfigured()) return;
+  clearTimeout(syncPushTimer);
+  syncPushTimer = setTimeout(pushSync, 1200);
+}
+
+async function manualSync() {
+  if (!syncConfigured()) { setSyncStatus('Connect sync first.', true); return; }
+  await pullSync();
+  await pushSync();
 }
 
 // ═══════════════════════════════════════════════════════
@@ -1781,6 +2251,8 @@ window.addEventListener('DOMContentLoaded', () => {
   loadHistory();
   loadScore();
   updateScore();
+  loadSyncConfig();
+  if (syncConfigured()) pullSync();
 
   const savedId = localStorage.getItem('ew_client_id');
   if (savedId) document.getElementById('client-id-input').value = savedId;

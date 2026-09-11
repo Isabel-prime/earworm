@@ -1694,6 +1694,12 @@ function renderHistory() {
     const time     = d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
     const result   = entry.result || 'skipped';
     const badge    = badgeLabel[result] || result;
+    // Correct is only shown in green when it was guessed on the very
+    // first attempt — matching how the all-time Success Rate stat only
+    // counts first-guess correct. A correct answer reached after one or
+    // more wrong guesses gets the same grey/neutral treatment as a wrong
+    // guess, since (for this stat's purposes) it isn't a "clean" success.
+    const badgeClass = (result === 'correct' && entry.guesses.length > 1) ? 'wrong' : result;
     const clipInfo = `clip @ ${formatMs(entry.clipStartMs)}` + (entry.clipSec ? ` · ${entry.clipSec}s` : '');
     const attempts = entry.guesses.length
       ? ` · ${entry.guesses.length} guess${entry.guesses.length === 1 ? '' : 'es'}`
@@ -1724,7 +1730,7 @@ function renderHistory() {
             `<div class="history-track">${escapeHtml(entry.name)}</div>` +
             `<div class="history-sub">${escapeHtml(entry.artist)} · ${clipInfo}${attempts}</div>` +
           `</div>` +
-          `<div class="history-badge ${result}">${badge}</div>` +
+          `<div class="history-badge ${badgeClass}">${badge}</div>` +
           (allExpanded ? `<button class="history-delete" title="Delete this entry" onclick="event.stopPropagation(); deleteHistoryEntry('${entry.id}')">✕</button>` : '') +
           `<div class="history-chevron">▶</div>` +
         `</div>` +

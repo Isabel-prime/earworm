@@ -838,19 +838,41 @@ async function handleCallback(code) {
   if (!clientId) { setStatus('Auth error: Client ID missing.', true); return; }
 
   setStatus('Authenticating with Spotify…');
-  const res = await fetch('https://accounts.spotify.com/api/token', {
-    method:  'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({
-      grant_type:    'authorization_code',
-      code,
-      redirect_uri:  REDIRECT_URI,
-      client_id:     clientId,
-      code_verifier: verifier,
-    }),
-  });
-  const data = await res.json();
-  if (data.error) { setStatus('Auth failed: ' + data.error_description, true); return; }
+
+  let res;
+  try {
+    res = await fetch('https://accounts.spotify.com/api/token', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type:    'authorization_code',
+        code,
+        redirect_uri:  REDIRECT_URI,
+        client_id:     clientId,
+        code_verifier: verifier,
+      }),
+    });
+  } catch (err) {
+    // fetch() throws for network-level failures (blocked request, DNS/TLS
+    // failure, offline, CORS rejection, etc.) rather than returning a
+    // response — without this catch, a failure here left the status frozen
+    // on "Authenticating…" forever with no visible error at all.
+    setStatus('Network error contacting Spotify: ' + err.message, true);
+    return;
+  }
+
+  let data;
+  try {
+    data = await res.json();
+  } catch (err) {
+    setStatus(`Spotify token response was not valid JSON (HTTP ${res.status}).`, true);
+    return;
+  }
+
+  if (!res.ok || data.error) {
+    setStatus('Auth failed: ' + (data.error_description || data.error || `HTTP ${res.status}`), true);
+    return;
+  }
 
   accessToken = data.access_token;
   localStorage.setItem('ew_token',     accessToken);

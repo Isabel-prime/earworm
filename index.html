@@ -777,7 +777,7 @@ let autocompleteIndex = -1;
 let sdkPlayer         = null;
 let sdkDeviceId       = null;
 let sdkReady          = false;
-let history           = [];
+let guessHistory      = [];
 let currentRoundEntry = null;
 let historyOpen       = false;
 let expandedHistoryIds = new Set();
@@ -879,7 +879,7 @@ async function handleCallback(code) {
   localStorage.setItem('ew_token_exp', Date.now() + (data.expires_in - 60) * 1000);
   sessionStorage.removeItem('pkce_verifier');
 
-  history.replaceState({}, '', window.location.pathname);
+  window.history.replaceState({}, '', window.location.pathname);
   showGameUI();
 }
 
@@ -1240,7 +1240,7 @@ async function playClip() {
   // resolves.
   if (targetRound) {
     targetRound.clipSec = Math.max(targetRound.clipSec, clipSec);
-    if (historyOpen && history.includes(targetRound)) { saveHistory(); renderHistory(); }
+    if (historyOpen && guessHistory.includes(targetRound)) { saveHistory(); renderHistory(); }
   }
 
   setStatus('Playing…');
@@ -1384,16 +1384,16 @@ function generateHistoryId() {
 
 function loadHistory() {
   try {
-    history = JSON.parse(localStorage.getItem(HISTORY_KEY) || '[]');
+    guessHistory = JSON.parse(localStorage.getItem(HISTORY_KEY) || '[]');
   } catch {
-    history = [];
+    guessHistory = [];
   }
 
   // Backfill ids for entries saved before this feature existed, so expand
   // state stays tied to the actual round rather than its array index
   // (which shifts every time a new round is unshifted onto the front).
   let backfilled = false;
-  for (const entry of history) {
+  for (const entry of guessHistory) {
     if (!entry.id) { entry.id = generateHistoryId(); backfilled = true; }
   }
   if (backfilled) saveHistory();
@@ -1401,7 +1401,7 @@ function loadHistory() {
 
 function saveHistory() {
   try {
-    localStorage.setItem(HISTORY_KEY, JSON.stringify(history));
+    localStorage.setItem(HISTORY_KEY, JSON.stringify(guessHistory));
   } catch {
     // storage full or unavailable — history just won't persist this session
   }
@@ -1431,7 +1431,7 @@ function recordGuessAttempt(text, correct) {
 function finalizeRound(result) {
   if (!currentRoundEntry || currentRoundEntry.result) return;
   currentRoundEntry.result = result;
-  history.unshift(currentRoundEntry);
+  guessHistory.unshift(currentRoundEntry);
   saveHistory();
   if (historyOpen) renderHistory();
   renderStats();
@@ -1441,19 +1441,19 @@ function finalizeRound(result) {
 //  ALL-TIME STATS  (derived from history, most-recent-first)
 // ═══════════════════════════════════════════════════════
 function computeStats() {
-  const total = history.length;
+  const total = guessHistory.length;
 
   // Success rate: only songs guessed correctly on the very first attempt
   // count as a success. Multi-guess correct answers, reveals, and skips
   // all count against it.
-  const firstGuessCorrect = history.filter(
+  const firstGuessCorrect = guessHistory.filter(
     e => e.result === 'correct' && e.guesses.length === 1
   ).length;
   const successRate = total ? Math.round((firstGuessCorrect / total) * 100) : null;
 
   // Avg guesses per song: only over songs eventually guessed correctly
   // (reveals/skips excluded), counting every attempt including the win.
-  const solved = history.filter(e => e.result === 'correct');
+  const solved = guessHistory.filter(e => e.result === 'correct');
   const avgGuesses = solved.length
     ? solved.reduce((sum, e) => sum + e.guesses.length, 0) / solved.length
     : null;
@@ -1464,7 +1464,7 @@ function computeStats() {
   // before streakResetAt are never counted, so hitting Reset zeroes the
   // streak without touching history or the stats above.
   let streak = 0;
-  for (const e of history) {
+  for (const e of guessHistory) {
     if (e.playedAt <= streakResetAt) break;
     if (e.result === 'correct' && e.guesses.length === 1) streak++;
     else break;
@@ -1498,11 +1498,11 @@ function toggleHistoryItem(id) {
 }
 
 function toggleExpandAllHistory() {
-  const allExpanded = history.length > 0 && history.every(e => expandedHistoryIds.has(e.id));
+  const allExpanded = guessHistory.length > 0 && guessHistory.every(e => expandedHistoryIds.has(e.id));
   if (allExpanded) {
     expandedHistoryIds.clear();
   } else {
-    history.forEach(e => expandedHistoryIds.add(e.id));
+    guessHistory.forEach(e => expandedHistoryIds.add(e.id));
   }
   renderHistory();
 }
@@ -1512,11 +1512,11 @@ function renderHistory() {
 
   const expandAllBtn = document.getElementById('history-expand-all-btn');
   if (expandAllBtn) {
-    const allExpanded = history.length > 0 && history.every(e => expandedHistoryIds.has(e.id));
+    const allExpanded = guessHistory.length > 0 && guessHistory.every(e => expandedHistoryIds.has(e.id));
     expandAllBtn.textContent = allExpanded ? 'Collapse All' : 'Expand All';
   }
 
-  if (history.length === 0) {
+  if (guessHistory.length === 0) {
     list.innerHTML = '<div class="history-empty">No rounds played yet.</div>';
     return;
   }
@@ -1530,7 +1530,7 @@ function renderHistory() {
   let html = '';
   let lastDay = null;
 
-  history.forEach((entry, i) => {
+  guessHistory.forEach((entry, i) => {
     // Fall back to a stable id for entries saved before ids existed.
     if (!entry.id) entry.id = 'legacy-' + i;
 

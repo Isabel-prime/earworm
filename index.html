@@ -510,6 +510,18 @@
       transition: transform 0.15s;
     }
     .history-item.expanded .history-chevron { transform: rotate(90deg); }
+    .history-delete {
+      flex-shrink: 0;
+      background: transparent;
+      border: none;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1;
+      padding: 4px 2px;
+      cursor: pointer;
+      font-family: 'IBM Plex Mono', monospace;
+    }
+    .history-delete:hover { color: var(--text); }
     .history-guesses {
       display: none;
       margin-top: 10px;
@@ -1158,8 +1170,6 @@ async function loadPlaylist() {
 function pickNextSong() {
   if (playlist.length === 0) return;
 
-  finalizeRound('skipped');
-
   currentTrack = playlist[Math.floor(Math.random() * playlist.length)];
   const maxStart = Math.max(0, currentTrack.duration_ms - 30000);
   clipStartMs = Math.floor(Math.random() * maxStart);
@@ -1384,6 +1394,13 @@ function revealSong() {
 function nextSong() {
   if (sdkPlayer) sdkPlayer.pause();
   clearTimeout(playTimer);
+  // Only this explicit "Next Song" action records a skip. pickNextSong()
+  // itself never finalizes anything as skipped — so any other path that
+  // starts a fresh round (reloading the playlist, a browser bfcache
+  // restore, switching devices, etc.) just silently drops whatever
+  // unresolved round was in progress rather than recording a skip that
+  // was never actually pressed.
+  finalizeRound('skipped');
   pickNextSong();
 }
 
@@ -1600,6 +1617,26 @@ function toggleHistory() {
   if (historyOpen) renderHistory();
 }
 
+function deleteHistoryEntry(id) {
+  const idx = guessHistory.findIndex(e => e.id === id);
+  if (idx === -1) return;
+
+  const [removed] = guessHistory.splice(idx, 1);
+  expandedHistoryIds.delete(id);
+  saveHistory();
+  renderHistory();
+  renderStats();
+
+  // Mark that day as touched so the next push rewrites its file WITHOUT
+  // this entry — deleting locally alone wouldn't stick, since a plain
+  // Gist edit would just get this entry merged back in from local memory
+  // on the next sync (merging is deliberately additive/non-destructive).
+  // Removing it here first, then pushing, is what makes a deletion
+  // actually take on the remote side too.
+  markDateTouched(dateKey(removed.playedAt));
+  scheduleSyncPush();
+}
+
 function toggleHistoryItem(id) {
   if (expandedHistoryIds.has(id)) expandedHistoryIds.delete(id);
   else expandedHistoryIds.add(id);
@@ -1619,9 +1656,13 @@ function toggleExpandAllHistory() {
 function renderHistory() {
   const list = document.getElementById('history-list');
 
+  // Delete buttons only appear once every entry is expanded (i.e. after
+  // using "Expand All") — an extra deliberate step so the ✕ can't be hit
+  // by accident while just browsing/expanding individual entries.
+  const allExpanded = guessHistory.length > 0 && guessHistory.every(e => expandedHistoryIds.has(e.id));
+
   const expandAllBtn = document.getElementById('history-expand-all-btn');
   if (expandAllBtn) {
-    const allExpanded = guessHistory.length > 0 && guessHistory.every(e => expandedHistoryIds.has(e.id));
     expandAllBtn.textContent = allExpanded ? 'Collapse All' : 'Expand All';
   }
 
@@ -1684,6 +1725,7 @@ function renderHistory() {
             `<div class="history-sub">${escapeHtml(entry.artist)} · ${clipInfo}${attempts}</div>` +
           `</div>` +
           `<div class="history-badge ${result}">${badge}</div>` +
+          (allExpanded ? `<button class="history-delete" title="Delete this entry" onclick="event.stopPropagation(); deleteHistoryEntry('${entry.id}')">✕</button>` : '') +
           `<div class="history-chevron">▶</div>` +
         `</div>` +
         `<div class="history-guesses" onclick="event.stopPropagation()">${guessesHtml}</div>` +
@@ -2246,6 +2288,17 @@ function levenshtein(a, b) {
 // ═══════════════════════════════════════════════════════
 //  INIT
 // ═══════════════════════════════════════════════════════
+// Many mobile browsers restore a page from a back/forward cache on
+// "reload" (or on returning to the tab) instead of doing a true fresh
+// load — DOMContentLoaded never re-fires, and any in-progress round
+// (currentRoundEntry) would otherwise survive with its old, stale state.
+// If that leftover round later got superseded, it would get finalized as
+// "skipped" even though nothing was actually skipped. Clearing it out
+// right before the page is hidden/cached, and again if a cached copy is
+// ever restored, closes that off from both directions.
+window.addEventListener('pagehide', () => { currentRoundEntry = null; });
+window.addEventListener('pageshow', (e) => { if (e.persisted) currentRoundEntry = null; });
+
 window.addEventListener('DOMContentLoaded', () => {
   showRedirectURI();
   loadHistory();
